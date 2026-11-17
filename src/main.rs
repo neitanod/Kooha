@@ -42,6 +42,7 @@ mod recording;
 mod screencast_portal;
 mod settings;
 mod timer;
+mod tray;
 mod window;
 
 use gettextrs::{LocaleCategory, gettext};

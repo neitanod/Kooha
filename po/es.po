@@ -32,7 +32,7 @@ msgstr ""
 
 #: data/io.github.seadve.Kooha.desktop.in.in:2
 #: data/io.github.seadve.Kooha.metainfo.xml.in.in:7 src/about.rs:24
-#: src/main.rs:61
+#: src/main.rs:61 src/tray/model.rs:144 src/tray/service.rs:72
 msgid "Kooha"
 msgstr "Kooha"
 
@@ -242,7 +242,7 @@ msgstr "Activar micrófono"
 msgid "Disable Microphone"
 msgstr "Desactivar micrófono"
 
-#: data/resources/ui/window.ui:106
+#: data/resources/ui/window.ui:106 src/tray/model.rs:109
 msgid "Show Pointer"
 msgstr "Mostrar puntero"
 
@@ -250,7 +250,7 @@ msgstr "Mostrar puntero"
 msgid "Hide Pointer"
 msgstr "Ocultar puntero"
 
-#: data/resources/ui/window.ui:117
+#: data/resources/ui/window.ui:117 src/tray/model.rs:82
 msgid "Start Recording"
 msgstr "Iniciar grabación"
 
@@ -262,7 +262,7 @@ msgstr "Grabar"
 msgid "Forget Previously Selected Video Sources"
 msgstr "Olvidar fuentes de vídeo anteriormente seleccionadas"
 
-#: data/resources/ui/window.ui:182
+#: data/resources/ui/window.ui:182 src/tray/model.rs:84
 msgid "Stop Recording"
 msgstr "Detener grabación"
 
@@ -428,6 +428,38 @@ msgstr "No se pudo abrir «{path}» para escritura"
 msgid "Select Recordings Folder"
 msgstr "Elegir carpeta de grabaciones"
 
+#: src/tray/model.rs:97
+msgid "Record Desktop Audio"
+msgstr "Grabar audio del escritorio"
+
+#: src/tray/model.rs:103
+msgid "Record Microphone"
+msgstr "Grabar micrófono"
+
+#: src/tray/model.rs:117
+msgid "Show Window"
+msgstr "Mostrar ventana"
+
+#: src/tray/model.rs:149
+msgid "Ready"
+msgstr "Listo"
+
+#: src/tray/model.rs:150
+msgid "Starting…"
+msgstr "Empezando…"
+
+#: src/tray/model.rs:152
+msgid "Recording — {time}"
+msgstr "Grabando — {time}"
+
+#: src/tray/model.rs:155
+msgid "Paused — {time}"
+msgstr "En pausa — {time}"
+
+#: src/tray/model.rs:157
+msgid "Saving…"
+msgstr "Guardando…"
+
 #: src/window/mod.rs:78
 msgid "Failed to toggle pause"
 msgstr "No se pudo conmutar la pausa"
@@ -452,7 +484,7 @@ msgstr ""
 msgid "Quit the Application?"
 msgstr "¿Quiere salir de la aplicación?"
 
-#: src/window/mod.rs:215
+#: src/tray/model.rs:122 src/window/mod.rs:215
 msgid "Quit"
 msgstr "Salir"
 

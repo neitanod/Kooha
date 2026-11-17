@@ -1,4 +1,5 @@
 use adw::{prelude::*, subclass::prelude::*};
+use futures_util::StreamExt;
 use gettextrs::gettext;
 use gtk::{
     gio,
@@ -12,17 +13,21 @@ use crate::{
     format,
     preferences_dialog::PreferencesDialog,
     settings::Settings,
-    window::Window,
+    tray::{TrayCommand, TrayModel, TrayRequest, TrayService, model::tray_state},
+    window::{RecordingSnapshot, Window},
 };
 
 mod imp {
-    use std::cell::OnceCell;
+    use std::cell::{Cell, OnceCell};
 
     use super::*;
 
     #[derive(Debug, Default)]
     pub struct Application {
         pub(super) settings: OnceCell<Settings>,
+        pub(super) tray: OnceCell<TrayService>,
+        /// The last snapshot the window sent, reused on settings changes.
+        pub(super) tray_snapshot: Cell<Option<RecordingSnapshot>>,
     }
 
     #[glib::object_subclass]
@@ -58,6 +63,7 @@ mod imp {
 
             obj.setup_gactions();
             obj.setup_accels();
+            obj.setup_tray();
         }
     }
 
@@ -159,6 +165,106 @@ impl Application {
         notification.set_body(Some(&warnings.labels().join(" · ")));
 
         self.send_notification(Some("capture-warnings"), &notification);
+    }
+
+    /// Shows `snapshot`, the window's recording, in the tray.
+    ///
+    /// This must never call `Application::window()`: the window calls this
+    /// from its `constructed`, before the app lists it, so `window()` would
+    /// build another window.
+    pub fn update_tray(&self, snapshot: Option<RecordingSnapshot>) {
+        let imp = self.imp();
+
+        imp.tray_snapshot.set(snapshot);
+
+        if let Some(tray) = imp.tray.get() {
+            tray.update(tray_model(snapshot, self.settings()));
+        }
+    }
+
+    fn refresh_tray(&self) {
+        self.update_tray(self.imp().tray_snapshot.get());
+    }
+
+    fn setup_tray(&self) {
+        let settings = self.settings();
+
+        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+        let tray = TrayService::spawn(sender, tray_model(None, settings));
+        self.imp().tray.set(tray).unwrap();
+
+        glib::spawn_future_local(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            async move {
+                while let Some(request) = receiver.next().await {
+                    obj.handle_tray_command(request);
+                }
+            }
+        ));
+
+        settings.connect_record_desktop_audio_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+        settings.connect_record_microphone_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+        settings.connect_show_pointer_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+        settings.connect_profile_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+    }
+
+    fn handle_tray_command(&self, request: TrayRequest) {
+        let TrayRequest {
+            command,
+            activation_token,
+        } = request;
+
+        match command {
+            TrayCommand::ToggleRecord => {
+                if let Err(err) =
+                    WidgetExt::activate_action(&self.window(), "win.toggle-record", None)
+                {
+                    tracing::warn!("Failed to toggle record from the tray: {:?}", err);
+                }
+            }
+            TrayCommand::ShowWindow => self.present_window(activation_token.as_deref()),
+            TrayCommand::Quit => {
+                // The quit confirmation needs the window on screen.
+                self.present_window(activation_token.as_deref());
+                ActionGroupExt::activate_action(self, "quit", None);
+            }
+            TrayCommand::ToggleDesktopAudio
+            | TrayCommand::ToggleMicrophone
+            | TrayCommand::TogglePointer => {
+                let has_recording = self
+                    .active_window()
+                    .and_downcast::<Window>()
+                    .is_some_and(|window| window.recording_snapshot().is_some());
+                apply_tray_command(command, self.settings(), has_recording);
+            }
+        }
+    }
+
+    /// Brings the window to the front. On Wayland the compositor only does
+    /// it with the activation token of the click (fable code r1 #4).
+    fn present_window(&self, activation_token: Option<&str>) {
+        let window = self.window();
+        if let Some(token) = activation_token {
+            window.set_startup_id(token);
+        }
+        window.present();
     }
 
     pub fn run(&self) -> glib::ExitCode {
@@ -265,5 +371,145 @@ impl Application {
         self.set_accels_for_action("win.toggle-record", &["<Control>r"]);
         // self.set_accels_for_action("win.toggle-pause", &["<Control>k"]); // See issue #112 in GitHub repo
         self.set_accels_for_action("win.cancel-record", &["<Control>c"]);
+    }
+}
+
+/// The tray contents for the window's recording `snapshot` and `settings`.
+fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayModel {
+    let (state, duration, warnings) = snapshot.map_or(
+        (None, gst::ClockTime::ZERO, CaptureWarnings::default()),
+        |(state, duration, warnings)| (Some(state), duration, warnings),
+    );
+
+    TrayModel {
+        state: tray_state(state),
+        duration_text: format::digital_clock(duration),
+        warnings: warnings.labels(),
+        record_desktop_audio: settings.record_desktop_audio(),
+        record_microphone: settings.record_microphone(),
+        show_pointer: settings.show_pointer(),
+        audio_supported: settings
+            .profile()
+            .is_none_or(|profile| profile.supports_audio()),
+    }
+}
+
+/// Applies a capture toggle from the tray to `settings`, which the window's
+/// actions share. Returns whether it changed anything.
+///
+/// The tray disables the toggles during a recording; `has_recording` covers
+/// a click that arrives late.
+fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: bool) -> bool {
+    if has_recording {
+        return false;
+    }
+
+    match command {
+        TrayCommand::ToggleDesktopAudio => {
+            settings.set_record_desktop_audio(!settings.record_desktop_audio());
+        }
+        TrayCommand::ToggleMicrophone => {
+            settings.set_record_microphone(!settings.record_microphone());
+        }
+        TrayCommand::TogglePointer => settings.set_show_pointer(!settings.show_pointer()),
+        TrayCommand::ToggleRecord | TrayCommand::ShowWindow | TrayCommand::Quit => return false,
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        recording::RecordingState,
+        settings::test_utils::{init_resources, settings_lock, setup_schema},
+        tray::{
+            TrayCommand,
+            model::{TrayEntry, TrayRecordingState, menu_entries},
+        },
+    };
+
+    const CAPTURE_KEYS: [&str; 3] = ["record-desktop-audio", "record-microphone", "show-pointer"];
+
+    fn reset_capture_keys(settings: &Settings) {
+        for key in CAPTURE_KEYS {
+            settings.reset(key);
+        }
+    }
+
+    /// Building the window must not end up creating another window: its
+    /// `constructed` updates the tray before the app lists it.
+    #[gtk::test]
+    fn app_and_window_construct() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let window = Window::new(&app);
+
+        assert!(window.recording_snapshot().is_none());
+        assert!(app.imp().tray.get().is_none());
+    }
+
+    #[test]
+    fn apply_tray_command_syncs_window_action() {
+        let _lock = settings_lock();
+        setup_schema();
+
+        let settings = Settings::default();
+        reset_capture_keys(&settings);
+        let action = settings.create_record_microphone_action();
+        let before = settings.record_microphone();
+
+        assert!(apply_tray_command(
+            TrayCommand::ToggleMicrophone,
+            &settings,
+            false
+        ));
+        assert_eq!(settings.record_microphone(), !before);
+        assert_eq!(action.state(), Some((!before).to_variant()));
+
+        assert!(!apply_tray_command(
+            TrayCommand::ToggleMicrophone,
+            &settings,
+            true
+        ));
+        assert_eq!(settings.record_microphone(), !before);
+
+        reset_capture_keys(&settings);
+    }
+
+    #[gtk::test]
+    fn tray_shows_starting_while_portal_pending() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        reset_capture_keys(&settings);
+        settings.reset("profile-id");
+
+        let model = tray_model(
+            Some((
+                RecordingState::Init,
+                gst::ClockTime::ZERO,
+                CaptureWarnings::default(),
+            )),
+            &settings,
+        );
+
+        assert_eq!(model.state, TrayRecordingState::Starting);
+        let check_states = menu_entries(&model)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                TrayEntry::Check { enabled, .. } => Some(enabled),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(check_states, [false, false, false]);
     }
 }

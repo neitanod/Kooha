@@ -9,7 +9,7 @@ use gtk::{
     glib::{self, clone},
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
@@ -23,6 +23,10 @@ use crate::{
     recording::{NoProfileError, Recording, RecordingState},
     settings::CaptureMode,
 };
+
+/// What the tray shows of the window's recording: its state, its duration
+/// and its capture warnings.
+pub type RecordingSnapshot = (RecordingState, gst::ClockTime, CaptureWarnings);
 
 mod imp {
     use super::*;
@@ -62,6 +66,8 @@ mod imp {
         pub(super) inhibit_cookie: RefCell<Option<u32>>,
         pub(super) warnings_notifier: WarningsNotifier,
         pub(super) recording: RefCell<Option<(Recording, Vec<glib::SignalHandlerId>)>>,
+        /// The last whole second of the recording duration sent to the tray.
+        pub(super) tray_duration_secs: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -182,6 +188,26 @@ impl Window {
                         | RecordingState::Flushing { .. }
                 )
             })
+    }
+
+    /// Returns the state of the recording while there is one, also before it
+    /// begins.
+    pub fn recording_snapshot(&self) -> Option<RecordingSnapshot> {
+        self.imp()
+            .recording
+            .borrow()
+            .as_ref()
+            .map(|(recording, _)| {
+                (
+                    recording.state(),
+                    recording.duration(),
+                    recording.capture_warnings(),
+                )
+            })
+    }
+
+    fn update_tray(&self) {
+        Application::get().update_tray(self.recording_snapshot());
     }
 
     /// Returns `Proceed` if the user wants to proceed with the quit operation.
@@ -369,14 +395,24 @@ impl Window {
                 self,
                 move |_| {
                     obj.update_warnings_boxes();
+                    obj.update_tray();
                 }
             )),
             recording.connect_duration_notify(clone!(
                 #[weak(rename_to = obj)]
                 self,
                 move |recording| {
-                    let formatted_time = format::digital_clock(recording.duration());
-                    obj.imp().recording_time_label.set_label(&formatted_time);
+                    let imp = obj.imp();
+
+                    let duration = recording.duration();
+                    let formatted_time = format::digital_clock(duration);
+                    imp.recording_time_label.set_label(&formatted_time);
+
+                    // The duration changes several times per second, but the
+                    // tray only shows whole seconds.
+                    if imp.tray_duration_secs.replace(duration.seconds()) != duration.seconds() {
+                        obj.update_tray();
+                    }
                 }
             )),
             recording.connect_finished(clone!(
@@ -389,7 +425,10 @@ impl Window {
         ];
         imp.recording
             .replace(Some((recording.clone(), handler_ids)));
+        imp.tray_duration_secs.set(0);
 
+        // Show `Starting` while the portal dialog is open.
+        self.update_tray();
         self.update_inhibit();
 
         recording
@@ -466,6 +505,7 @@ impl Window {
                 recording.disconnect(handler_id);
             }
 
+            self.update_tray();
             self.update_inhibit();
         } else {
             tracing::warn!("Recording finished but no stored recording");
@@ -542,6 +582,7 @@ impl Window {
         }
 
         self.update_warnings_boxes();
+        self.update_tray();
 
         self.action_set_enabled(
             "win.toggle-record",
