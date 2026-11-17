@@ -239,6 +239,13 @@ impl Application {
                     tracing::warn!("Failed to toggle record from the tray: {:?}", err);
                 }
             }
+            TrayCommand::TogglePause => {
+                if let Err(err) =
+                    WidgetExt::activate_action(&self.window(), "win.toggle-pause", None)
+                {
+                    tracing::warn!("Failed to toggle pause from the tray: {:?}", err);
+                }
+            }
             TrayCommand::ShowWindow => self.present_window(activation_token.as_deref()),
             TrayCommand::Quit => {
                 // The quit confirmation needs the window on screen.
@@ -369,7 +376,7 @@ impl Application {
         self.set_accels_for_action("win.record-microphone", &["<Control>m"]);
         self.set_accels_for_action("win.show-pointer", &["<Control>p"]);
         self.set_accels_for_action("win.toggle-record", &["<Control>r"]);
-        // self.set_accels_for_action("win.toggle-pause", &["<Control>k"]); // See issue #112 in GitHub repo
+        self.set_accels_for_action("win.toggle-pause", &["<Control>k"]);
         self.set_accels_for_action("win.cancel-record", &["<Control>c"]);
     }
 }
@@ -412,7 +419,10 @@ fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: 
             settings.set_record_microphone(!settings.record_microphone());
         }
         TrayCommand::TogglePointer => settings.set_show_pointer(!settings.show_pointer()),
-        TrayCommand::ToggleRecord | TrayCommand::ShowWindow | TrayCommand::Quit => return false,
+        TrayCommand::ToggleRecord
+        | TrayCommand::TogglePause
+        | TrayCommand::ShowWindow
+        | TrayCommand::Quit => return false,
     }
 
     true

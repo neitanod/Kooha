@@ -33,6 +33,7 @@ pub struct TrayModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     ToggleRecord,
+    TogglePause,
     ToggleDesktopAudio,
     ToggleMicrophone,
     TogglePointer,
@@ -88,6 +89,18 @@ pub fn menu_entries(model: &TrayModel) -> Vec<TrayEntry> {
         // countdown and while saving.
         enabled: matches!(model.state, Idle | Recording | Paused),
     });
+    // Same states as `win.toggle-pause`.
+    if matches!(model.state, Recording | Paused) {
+        entries.push(TrayEntry::Button {
+            label: if model.state == Paused {
+                gettext("Resume")
+            } else {
+                gettext("Pause")
+            },
+            command: TrayCommand::TogglePause,
+            enabled: true,
+        });
+    }
     entries.push(TrayEntry::Separator);
 
     // A recording reads these settings only once, when it begins.
@@ -369,5 +382,56 @@ mod tests {
         assert!(body.contains("Recording — 00:12"), "{body}");
         assert!(body.contains("Without microphone"), "{body}");
         assert!(body.contains("Without mouse pointer"), "{body}");
+    }
+
+    fn entry_after_record_button(entries: &[TrayEntry]) -> &TrayEntry {
+        let index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    TrayEntry::Button {
+                        command: TrayCommand::ToggleRecord,
+                        ..
+                    }
+                )
+            })
+            .expect("menu has a record button");
+        &entries[index + 1]
+    }
+
+    fn has_pause_button(entries: &[TrayEntry]) -> bool {
+        entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TrayEntry::Button {
+                    command: TrayCommand::TogglePause,
+                    ..
+                }
+            )
+        })
+    }
+
+    #[test]
+    fn pause_button_follows_state() {
+        let recording = menu_entries(&model(TrayRecordingState::Recording));
+        assert_eq!(
+            entry_after_record_button(&recording),
+            &button("Pause", TrayCommand::TogglePause)
+        );
+
+        let paused = menu_entries(&model(TrayRecordingState::Paused));
+        assert_eq!(
+            entry_after_record_button(&paused),
+            &button("Resume", TrayCommand::TogglePause)
+        );
+
+        for state in [
+            TrayRecordingState::Idle,
+            TrayRecordingState::Starting,
+            TrayRecordingState::Flushing,
+        ] {
+            assert!(!has_pause_button(&menu_entries(&model(state))), "{state:?}");
+        }
     }
 }

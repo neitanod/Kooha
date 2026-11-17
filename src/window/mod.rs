@@ -748,4 +748,26 @@ mod tests {
     fn no_warning_chips_without_warnings() {
         assert!(warning_chips(CaptureWarnings::default()).is_empty());
     }
+
+    #[gtk::test]
+    fn pause_controls_are_shown() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+        // The window is never presented, so this reads the button's own
+        // `visible` and not whether it is on screen.
+        assert!(window.imp().pause_record_button.get_visible());
+
+        // The shortcuts dialog lists the pause shortcut.
+        let builder = gtk::Builder::from_resource("/io/github/seadve/Kooha/shortcuts-dialog.ui");
+        let lists_toggle_pause = builder.objects().iter().any(|object| {
+            object.find_property("action-name").is_some()
+                && object.property::<Option<String>>("action-name").as_deref()
+                    == Some("win.toggle-pause")
+        });
+        assert!(lists_toggle_pause);
+    }
 }

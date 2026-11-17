@@ -7,6 +7,7 @@ use std::{os::unix::io::RawFd, path::PathBuf};
 use crate::{
     area_selector::SelectAreaData,
     device::{self, DeviceClass},
+    pause_gate::PauseGate,
     profile::Profile,
     screencast_portal::Stream,
 };
@@ -24,6 +25,8 @@ pub struct PipelineBuilder {
     record_desktop_audio: bool,
     record_microphone: bool,
     select_area_data: Option<SelectAreaData>,
+    pause_gate: PauseGate,
+    pause_flash: bool,
 }
 
 impl PipelineBuilder {
@@ -43,6 +46,8 @@ impl PipelineBuilder {
             record_desktop_audio: false,
             record_microphone: false,
             select_area_data: None,
+            pause_gate: PauseGate::default(),
+            pause_flash: false,
         }
     }
 
@@ -61,14 +66,24 @@ impl PipelineBuilder {
         self
     }
 
+    pub fn pause_gate(&mut self, gate: PauseGate) -> &mut Self {
+        self.pause_gate = gate;
+        self
+    }
+
+    pub fn pause_flash(&mut self, pause_flash: bool) -> &mut Self {
+        self.pause_flash = pause_flash;
+        self
+    }
+
     /// Builds the pipeline.
     ///
-    ///                   (If has select_area_data)
-    ///                        |             |
-    ///                        v             v
-    /// pipewiresrc-bin -> videoscale -> videocrop -> queue -> |
-    ///                                                        | -> profile.attach -> filesink
-    ///                               pulsesrc-bin -> queue -> |
+    ///                   (If has select_area_data)    (If pause_flash)
+    ///                        |             |                     |
+    ///                        v             v                     v
+    /// pipewiresrc-bin -> videoscale -> videocrop -> gate -> videobalance -> queue -> |
+    ///                                                                                | -> profile.attach -> filesink
+    ///                                                pulsesrc-bin -> gate -> queue -> |
     pub fn build(&self) -> Result<gst::Pipeline> {
         tracing::debug!(
             file_path = %self.file_path.display(),
@@ -80,15 +95,13 @@ impl PipelineBuilder {
             record_desktop_audio = ?self.record_desktop_audio,
             record_microphone = ?self.record_microphone,
             select_area_data = ?self.select_area_data,
+            pause_flash = self.pause_flash,
         );
 
         let pipeline = gst::Pipeline::new();
 
         let videosrc_bin = make_videosrc_bin(self.fd, &self.streams, self.framerate)
             .context("Failed to create videosrc bin")?;
-        let videoenc_queue = gst::ElementFactory::make("queue")
-            .name("kooha-videoenc-queue")
-            .build()?;
         let filesink = gst::ElementFactory::make("filesink")
             .property(
                 "location",
@@ -97,9 +110,9 @@ impl PipelineBuilder {
                     .context("Could not convert file path to string")?,
             )
             .build()?;
-        pipeline.add_many([videosrc_bin.upcast_ref(), &videoenc_queue, &filesink])?;
+        pipeline.add_many([videosrc_bin.upcast_ref(), &filesink])?;
 
-        if let Some(ref data) = self.select_area_data {
+        let video_out = if let Some(ref data) = self.select_area_data {
             let videoscale = gst::ElementFactory::make("videoscale").build()?;
             let videocrop = make_videocrop(data)?;
             pipeline.add_many([&videoscale, &videocrop])?;
@@ -113,10 +126,17 @@ impl PipelineBuilder {
 
             videosrc_bin.link(&videoscale)?;
             videoscale.link_filtered(&videocrop, &videoscale_caps)?;
-            videocrop.link(&videoenc_queue)?;
+            videocrop
         } else {
-            videosrc_bin.link(&videoenc_queue)?;
-        }
+            videosrc_bin.clone().upcast()
+        };
+        let videoenc_queue = link_gated_queue(
+            &pipeline,
+            &video_out,
+            GatedBranch::Video,
+            &self.pause_gate,
+            self.pause_flash,
+        )?;
 
         let audioenc_queue = if self.record_desktop_audio || self.record_microphone {
             debug_assert!(self.profile.supports_audio());
@@ -134,14 +154,15 @@ impl PipelineBuilder {
                     .collect::<Result<Vec<_>>>()?,
             )
             .context("Failed to create audiosrc bin")?;
-            let audioenc_queue = gst::ElementFactory::make("queue")
-                .name("kooha-audioenc-queue")
-                .build()?;
+            pipeline.add(&audiosrc_bin)?;
 
-            pipeline.add_many([audiosrc_bin.upcast_ref(), &audioenc_queue])?;
-            audiosrc_bin.link(&audioenc_queue)?;
-
-            Some(audioenc_queue)
+            Some(link_gated_queue(
+                &pipeline,
+                audiosrc_bin.upcast_ref(),
+                GatedBranch::Audio,
+                &self.pause_gate,
+                false,
+            )?)
         } else {
             None
         };
@@ -162,6 +183,54 @@ impl PipelineBuilder {
 
         Ok(pipeline)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatedBranch {
+    Video,
+    Audio,
+}
+
+/// Links `src` through the pause gate into a new encoder queue, and returns
+/// the queue. For video with `pause_flash`, the resume flash goes between
+/// the gate and the queue.
+pub fn link_gated_queue(
+    pipeline: &gst::Pipeline,
+    src: &gst::Element,
+    branch: GatedBranch,
+    gate: &PauseGate,
+    pause_flash: bool,
+) -> Result<gst::Element> {
+    let (gate_name, queue_name) = match branch {
+        GatedBranch::Video => ("kooha-video-gate", "kooha-videoenc-queue"),
+        GatedBranch::Audio => ("kooha-audio-gate", "kooha-audioenc-queue"),
+    };
+
+    let identity = gst::ElementFactory::make("identity")
+        .name(gate_name)
+        .build()?;
+    let queue = gst::ElementFactory::make("queue")
+        .name(queue_name)
+        .build()?;
+    pipeline.add_many([&identity, &queue])?;
+    src.link(&identity)?;
+
+    // The probe goes on the gate's src pad, with nothing in between it and
+    // the flash, so that both run in the same streaming thread.
+    gate.attach(&identity.static_pad("src").unwrap());
+
+    if branch == GatedBranch::Video && pause_flash {
+        let videobalance = gst::ElementFactory::make("videobalance")
+            .name("kooha-pause-flash")
+            .build()?;
+        pipeline.add(&videobalance)?;
+        gst::Element::link_many([&identity, &videobalance, &queue])?;
+        gate.set_flash_element(&videobalance);
+    } else {
+        identity.link(&queue)?;
+    }
+
+    Ok(queue)
 }
 
 fn make_pipewiresrc(fd: RawFd, path: &str) -> Result<gst::Element> {
@@ -369,7 +438,7 @@ fn make_pulsesrc(class: DeviceClass, element_name: &str) -> Result<gst::Element>
 /// pulsesrc2 -> audiorate -> | -> audiomixer
 ///                           |
 /// pulsesrcn -> audiorate -> |
-fn make_audiosrc_bin<'a>(
+pub fn make_audiosrc_bin<'a>(
     pulsesrcs: impl IntoIterator<Item = &'a gst::Element>,
 ) -> Result<gst::Bin> {
     let bin = gst::Bin::builder().name("kooha-pulsesrc-bin").build();
@@ -460,5 +529,71 @@ mod test {
     fn float_round_to_even_f32() {
         assert_even!(round_to_even_f32(5.3));
         assert_even!(round_to_even_f32(2.9));
+    }
+
+    /// Names of the elements downstream of `element`, following `src` pads.
+    fn downstream_names(element: &gst::Element) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut current = element.clone();
+        while let Some(next) = current
+            .static_pad("src")
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+        {
+            names.push(next.name().to_string());
+            current = next;
+        }
+        names
+    }
+
+    /// The pipeline goes back too: dropping it would unlink its elements.
+    fn gated(
+        branch: GatedBranch,
+        pause_flash: bool,
+    ) -> (gst::Pipeline, gst::Element, gst::Element) {
+        gst::init().unwrap();
+
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("fakesrc").build().unwrap();
+        pipeline.add(&src).unwrap();
+        let queue =
+            link_gated_queue(&pipeline, &src, branch, &PauseGate::default(), pause_flash).unwrap();
+        (pipeline, src, queue)
+    }
+
+    #[test]
+    fn video_goes_through_gate_and_flash() {
+        let (_pipeline, src, queue) = gated(GatedBranch::Video, true);
+
+        assert_eq!(queue.name(), "kooha-videoenc-queue");
+        assert_eq!(
+            downstream_names(&src),
+            [
+                "kooha-video-gate",
+                "kooha-pause-flash",
+                "kooha-videoenc-queue"
+            ]
+        );
+    }
+
+    #[test]
+    fn flash_is_left_out_when_disabled() {
+        let (_pipeline, src, _) = gated(GatedBranch::Video, false);
+
+        assert_eq!(
+            downstream_names(&src),
+            ["kooha-video-gate", "kooha-videoenc-queue"]
+        );
+    }
+
+    #[test]
+    fn audio_goes_through_gate_without_flash() {
+        let (_pipeline, src, queue) = gated(GatedBranch::Audio, true);
+
+        assert_eq!(queue.name(), "kooha-audioenc-queue");
+        assert_eq!(
+            downstream_names(&src),
+            ["kooha-audio-gate", "kooha-audioenc-queue"]
+        );
     }
 }

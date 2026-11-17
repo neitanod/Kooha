@@ -50,6 +50,8 @@ mod imp {
         pub(super) profile_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(super) framerate_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(super) pause_flash_row: TemplateChild<adw::SwitchRow>,
     }
 
     #[glib::object_subclass]
@@ -97,6 +99,9 @@ mod imp {
             let settings = obj.settings();
             settings
                 .bind_record_delay(&self.delay_row.get(), "value")
+                .build();
+            settings
+                .bind_pause_flash(&self.pause_flash_row.get(), "active")
                 .build();
             settings.connect_saving_location_changed(clone!(
                 #[weak]
@@ -475,6 +480,8 @@ fn display_path(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    use crate::settings::test_utils::{init_resources, settings_lock, setup_schema};
+
     #[track_caller]
     fn assert_simplified_framerate(framerate: gst::Fraction) {
         let reduced = framerate.0.reduced();
@@ -490,5 +497,26 @@ mod tests {
         for framerate in BUILTIN_FRAMERATES {
             assert_simplified_framerate(*framerate);
         }
+    }
+
+    #[gtk::test]
+    fn pause_flash_row_is_bound() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        settings.reset("pause-flash");
+        let dialog = PreferencesDialog::new(&settings);
+        let row = dialog.imp().pause_flash_row.get();
+
+        assert!(!row.is_active());
+        row.set_active(true);
+        assert!(settings.pause_flash());
+        settings.set_pause_flash(false);
+        assert!(!row.is_active());
+
+        settings.reset("pause-flash");
     }
 }

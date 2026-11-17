@@ -35,6 +35,7 @@ mod format;
 mod help;
 mod i18n;
 mod item_row;
+mod pause_gate;
 mod pipeline;
 mod preferences_dialog;
 mod profile;

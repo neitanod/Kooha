@@ -25,6 +25,7 @@ use crate::{
     experimental::Feature,
     help::ContextWithHelp,
     i18n::gettext_f,
+    pause_gate::PauseGate,
     pipeline::PipelineBuilder,
     profile::Profile,
     screencast_portal::{
@@ -48,6 +49,8 @@ impl fmt::Display for NoProfileError {
 impl error::Error for NoProfileError {}
 
 /// Everything a recording reads from the settings, read once when it starts.
+// The bools mirror independent settings keys, not a hidden state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     pub profile: &'static Profile,
@@ -58,6 +61,7 @@ pub struct CaptureConfig {
     pub framerate: gst::Fraction,
     pub record_delay: Duration,
     pub saving_location: PathBuf,
+    pub pause_flash: bool,
 }
 
 impl CaptureConfig {
@@ -71,6 +75,7 @@ impl CaptureConfig {
             framerate: settings.framerate(),
             record_delay: settings.record_delay(),
             saving_location: settings.saving_location(),
+            pause_flash: settings.pause_flash(),
         })
     }
 
@@ -126,6 +131,7 @@ mod imp {
         pub(super) file: OnceCell<gio::File>,
 
         pub(super) estimated_final_duration: Cell<Option<gst::ClockTime>>,
+        pub(super) pause_gate: PauseGate,
 
         pub(super) timer: RefCell<Option<Timer>>,
         pub(super) session: RefCell<Option<Session>>,
@@ -265,6 +271,10 @@ impl Recording {
             pipeline_builder.record_microphone(config.record_microphone);
         }
 
+        pipeline_builder
+            .pause_gate(imp.pause_gate.clone())
+            .pause_flash(config.pause_flash);
+
         // Build pipeline
         let pipeline = pipeline_builder.build().with_context(|| {
             ContextWithHelp::new(
@@ -287,6 +297,15 @@ impl Recording {
         );
         imp.timer.replace(Some(Timer::clone(&timer)));
         timer.await?;
+
+        self.play()
+    }
+
+    /// Watches the bus, starts updating the duration and sets the pipeline
+    /// to playing.
+    fn play(&self) -> Result<()> {
+        let imp = self.imp();
+        let pipeline = self.pipeline();
 
         let bus_watch_guard = pipeline
             .bus()
@@ -328,17 +347,20 @@ impl Recording {
         Ok(())
     }
 
+    /// Pauses with the pause gate; the pipeline stays playing (ADR 0003).
     pub fn pause(&self) -> Result<()> {
         ensure!(
             matches!(self.state(), RecordingState::Recording),
             "Recording can only be paused from recording state"
         );
 
-        self.pipeline()
-            .set_state(gst::State::Paused)
-            .context("Failed to set pipeline state to paused")?;
-
-        // TODO Handle effect on estimated final duration
+        let running_time = self
+            .pipeline()
+            .current_running_time()
+            .context("Failed to pause: the pipeline has no running time")?;
+        self.imp().pause_gate.pause(running_time);
+        self.set_state(RecordingState::Paused);
+        self.update_duration();
 
         Ok(())
     }
@@ -349,9 +371,13 @@ impl Recording {
             "Recording can only be resumed from paused state"
         );
 
-        self.pipeline()
-            .set_state(gst::State::Playing)
-            .context("Failed to set pipeline state to playing from paused")?;
+        let running_time = self
+            .pipeline()
+            .current_running_time()
+            .context("Failed to resume: the pipeline has no running time")?;
+        self.imp().pause_gate.resume(running_time);
+        self.set_state(RecordingState::Recording);
+        self.update_duration();
 
         Ok(())
     }
@@ -370,9 +396,15 @@ impl Recording {
 
         let pipeline = self.pipeline();
 
+        // Taken before flushing, while the duration still excludes the pauses.
+        imp.estimated_final_duration.set(
+            pipeline
+                .current_running_time()
+                .map(|running_time| imp.pause_gate.recorded_duration(running_time)),
+        );
         self.set_state(RecordingState::Flushing { progress: 0 });
-        imp.estimated_final_duration
-            .set(pipeline.current_running_time());
+        // While flushing, the duration is what the pipeline has processed.
+        self.update_duration();
         self.update_flushing_progress();
 
         tracing::debug!("Sending eos event to pipeline");
@@ -478,7 +510,14 @@ impl Recording {
         let clock_time = imp
             .pipeline
             .get()
-            .and_then(|pipeline| pipeline.query_position::<gst::ClockTime>())
+            .and_then(|pipeline| match self.state() {
+                // Time on the clock, without the pauses.
+                RecordingState::Recording | RecordingState::Paused => pipeline
+                    .current_running_time()
+                    .map(|running_time| imp.pause_gate.recorded_duration(running_time)),
+                // What the pipeline has already processed.
+                _ => pipeline.query_position::<gst::ClockTime>(),
+            })
             .unwrap_or(gst::ClockTime::ZERO);
 
         if clock_time == self.duration() {
@@ -503,10 +542,7 @@ impl Recording {
             .estimated_final_duration
             .get()
             .map_or(0, |estimated_final_duration| {
-                let progress_percent = self.duration().nseconds() as f64
-                    / estimated_final_duration.nseconds() as f64
-                    * 100.0;
-                (progress_percent.round() as u8).clamp(0, 100)
+                flushing_progress(self.duration(), estimated_final_duration)
             });
 
         if prev_progress == progress {
@@ -612,12 +648,15 @@ impl Recording {
                     new_state,
                 );
 
-                let state = match new_state {
-                    gst::State::Paused => RecordingState::Paused,
-                    gst::State::Playing => RecordingState::Recording,
-                    _ => return glib::ControlFlow::Continue,
-                };
-                self.set_state(state);
+                // The pause gate sets `Paused`; the pipeline stays playing.
+                if new_state == gst::State::Playing
+                    && matches!(
+                        self.state(),
+                        RecordingState::Init | RecordingState::Delayed { .. }
+                    )
+                {
+                    self.set_state(RecordingState::Recording);
+                }
 
                 glib::ControlFlow::Continue
             }
@@ -717,6 +756,16 @@ async fn new_screencast_session(
     Ok((session, streams, restore_token, fd))
 }
 
+/// Saving progress in percent: `processed` out of `estimated`, capped at 100.
+fn flushing_progress(processed: gst::ClockTime, estimated: gst::ClockTime) -> u8 {
+    if estimated.is_zero() {
+        return 0;
+    }
+
+    let percent = processed.nseconds() as f64 / estimated.nseconds() as f64 * 100.0;
+    percent.round().min(100.0) as u8
+}
+
 fn new_recording_path(saving_location: &Path, extension: impl AsRef<OsStr>) -> PathBuf {
     let file_name = glib::DateTime::now_local()
         .expect("You are somehow on year 9999")
@@ -732,6 +781,8 @@ fn new_recording_path(saving_location: &Path, extension: impl AsRef<OsStr>) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::env;
 
     use crate::settings::test_utils::{
         init_resources, settings_lock, setup_schema, temp_saving_location,
@@ -750,20 +801,156 @@ mod tests {
             "record-desktop-audio",
             "record-microphone",
             "show-pointer",
+            "pause-flash",
         ] {
             settings.reset(key);
         }
         let saving_location = temp_saving_location(&settings);
         settings.set_record_desktop_audio(true);
         settings.set_record_microphone(false);
+        settings.set_pause_flash(true);
 
         let config = CaptureConfig::from_settings(&settings).unwrap();
         settings.set_record_microphone(true);
+        settings.set_pause_flash(false);
 
         assert!(!config.record_microphone);
+        assert!(config.pause_flash);
         assert_eq!(config.saving_location, saving_location);
         assert_eq!(config.warnings().labels(), ["Without microphone"]);
 
         settings.reset("saving-location");
+        settings.reset("pause-flash");
+    }
+
+    #[test]
+    fn flushing_progress_rounds_and_caps() {
+        let ms = gst::ClockTime::from_mseconds;
+
+        assert_eq!(flushing_progress(ms(500), gst::ClockTime::ZERO), 0);
+        assert_eq!(flushing_progress(ms(0), ms(1000)), 0);
+        assert_eq!(flushing_progress(ms(500), ms(1000)), 50);
+        assert_eq!(flushing_progress(ms(554), ms(1000)), 55);
+        assert_eq!(flushing_progress(ms(555), ms(1000)), 56);
+        assert_eq!(flushing_progress(ms(1000), ms(1000)), 100);
+        assert_eq!(flushing_progress(ms(2000), ms(1000)), 100);
+    }
+
+    /// Runs `pipeline` as the recording's, skipping the portal and the timer.
+    fn run_pipeline(recording: &Recording, pipeline: gst::Pipeline, file: gio::File) {
+        let imp = recording.imp();
+        imp.pipeline.set(pipeline).unwrap();
+        imp.file.set(file).unwrap();
+        recording.play().unwrap();
+    }
+
+    /// Waits on the main context until `condition` holds, for 5 s at most.
+    async fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Records with a synthetic pipeline that lags behind its source (each
+    /// buffer takes 40 ms to go through, frames come every 33 ms), stops,
+    /// and returns the progress right after `stop()` and every progress the
+    /// recording went through while flushing.
+    async fn record_lagging(pause_before_stop: bool) -> (RecordingState, Vec<u8>) {
+        gst::init().unwrap();
+
+        let pipeline = gst::parse::launch(
+            "videotestsrc is-live=true ! video/x-raw,framerate=30/1 ! identity name=gate ! queue ! identity sleep-time=40000 ! fakesink sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+
+        let recording = Recording::new();
+        recording
+            .imp()
+            .pause_gate
+            .attach(&pipeline.by_name("gate").unwrap().static_pad("src").unwrap());
+
+        let progress = Rc::new(RefCell::new(Vec::new()));
+        recording.connect_state_notify(clone!(
+            #[strong]
+            progress,
+            move |recording| {
+                if let RecordingState::Flushing { progress: value } = recording.state() {
+                    progress.borrow_mut().push(value);
+                }
+            }
+        ));
+        let result = Rc::new(RefCell::new(None));
+        recording.connect_finished(clone!(
+            #[strong]
+            result,
+            move |_, res| {
+                result.replace(Some(res.as_ref().map(|(_, duration)| *duration).ok()));
+            }
+        ));
+
+        run_pipeline(
+            &recording,
+            pipeline,
+            gio::File::for_path(env::temp_dir().join("kooha-test-lagging")),
+        );
+        wait_until("recording", || {
+            recording.state() == RecordingState::Recording
+        })
+        .await;
+
+        glib::timeout_future(Duration::from_secs(1)).await;
+        if pause_before_stop {
+            recording.pause().unwrap();
+            assert_eq!(recording.state(), RecordingState::Paused);
+            // Shorter than the lag, so there is still something to flush.
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+
+        recording.stop();
+        let after_stop = recording.state();
+
+        wait_until("the end of the recording", || result.borrow().is_some()).await;
+        assert!(result.borrow().unwrap().is_some(), "the recording failed");
+        assert_eq!(recording.state(), RecordingState::Finished);
+
+        let progress = progress.borrow().clone();
+        (after_stop, progress)
+    }
+
+    #[track_caller]
+    fn assert_progress(after_stop: RecordingState, progress: &[u8]) {
+        let RecordingState::Flushing {
+            progress: progress_after_stop,
+        } = after_stop
+        else {
+            panic!("not flushing after stop: {after_stop:?}");
+        };
+        assert!(progress_after_stop < 100, "{progress:?}");
+        assert!(
+            progress.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{progress:?}"
+        );
+        assert_eq!(progress.last(), Some(&100), "{progress:?}");
+    }
+
+    #[gtk::test]
+    async fn flushing_progress_grows_while_lagging() {
+        let (after_stop, progress) = record_lagging(false).await;
+
+        assert_progress(after_stop, &progress);
+    }
+
+    #[gtk::test]
+    async fn flushing_progress_grows_when_stopped_paused() {
+        let (after_stop, progress) = record_lagging(true).await;
+
+        assert_progress(after_stop, &progress);
     }
 }
