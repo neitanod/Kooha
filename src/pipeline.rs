@@ -117,12 +117,7 @@ impl PipelineBuilder {
             let videocrop = make_videocrop(data)?;
             pipeline.add_many([&videoscale, &videocrop])?;
 
-            // x264enc requires even resolution.
-            let (stream_width, stream_height) = data.stream_size;
-            let videoscale_caps = gst::Caps::builder("video/x-raw")
-                .field("width", round_to_even(stream_width))
-                .field("height", round_to_even(stream_height))
-                .build();
+            let videoscale_caps = videoscale_caps(data.stream_size);
 
             videosrc_bin.link(&videoscale)?;
             videoscale.link_filtered(&videocrop, &videoscale_caps)?;
@@ -254,9 +249,20 @@ fn make_videoflip() -> Result<gst::Element> {
     Ok(videoflip)
 }
 
-/// Create a videocrop element that computes the crop from the given coordinates
-/// and size.
-fn make_videocrop(data: &SelectAreaData) -> Result<gst::Element> {
+/// What `videocrop` cuts from each side of the frame, in stream pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crop {
+    pub top: i32,
+    pub left: i32,
+    pub right: i32,
+    pub bottom: i32,
+    /// The size of the frame that enters `videocrop`, after `videoscale`
+    /// made it even.
+    pub frame: (i32, i32),
+}
+
+/// Computes the crop from the selection coordinates and the stream size.
+pub fn compute_crop(data: &SelectAreaData) -> Crop {
     let SelectAreaData {
         selection,
         paintable_rect,
@@ -296,19 +302,51 @@ fn make_videocrop(data: &SelectAreaData) -> Result<gst::Element> {
 
     tracing::debug!(raw_top_crop, raw_left_crop, raw_right_crop, raw_bottom_crop);
 
-    let top_crop = round_to_even_f32(raw_top_crop).clamp(0, *stream_height);
-    let left_crop = round_to_even_f32(raw_left_crop).clamp(0, *stream_width);
-    let right_crop = round_to_even_f32(raw_right_crop).clamp(0, *stream_width);
-    let bottom_crop = round_to_even_f32(raw_bottom_crop).clamp(0, *stream_height);
-
-    tracing::debug!(top_crop, left_crop, right_crop, bottom_crop);
-
     // x264enc requires even resolution.
+    let crop = Crop {
+        top: round_to_even_f32(raw_top_crop).clamp(0, *stream_height),
+        left: round_to_even_f32(raw_left_crop).clamp(0, *stream_width),
+        right: round_to_even_f32(raw_right_crop).clamp(0, *stream_width),
+        bottom: round_to_even_f32(raw_bottom_crop).clamp(0, *stream_height),
+        frame: scaled_caps_size(*stream_size),
+    };
+
+    tracing::debug!(?crop);
+
+    crop
+}
+
+/// The size `videoscale` gives the stream before the crop; x264enc requires
+/// even resolution.
+fn scaled_caps_size((width, height): (i32, i32)) -> (i32, i32) {
+    (round_to_even(width), round_to_even(height))
+}
+
+/// The caps between `videoscale` and `videocrop`.
+fn videoscale_caps(stream_size: (i32, i32)) -> gst::Caps {
+    let (width, height) = scaled_caps_size(stream_size);
+    gst::Caps::builder("video/x-raw")
+        .field("width", width)
+        .field("height", height)
+        .build()
+}
+
+/// Create a videocrop element that computes the crop from the given coordinates
+/// and size.
+fn make_videocrop(data: &SelectAreaData) -> Result<gst::Element> {
+    let Crop {
+        top,
+        left,
+        right,
+        bottom,
+        ..
+    } = compute_crop(data);
+
     let crop = gst::ElementFactory::make("videocrop")
-        .property("top", top_crop)
-        .property("left", left_crop)
-        .property("right", right_crop)
-        .property("bottom", bottom_crop)
+        .property("top", top)
+        .property("left", left)
+        .property("right", right)
+        .property("bottom", bottom)
         .build()?;
     Ok(crop)
 }
@@ -494,6 +532,7 @@ fn round_to_even_f32(number: f32) -> i32 {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::area_selector::Selection;
 
     macro_rules! assert_even {
         ($number:expr) => {
@@ -529,6 +568,49 @@ mod test {
     fn float_round_to_even_f32() {
         assert_even!(round_to_even_f32(5.3));
         assert_even!(round_to_even_f32(2.9));
+    }
+
+    fn select_area_data(stream_size: (i32, i32)) -> SelectAreaData {
+        SelectAreaData {
+            selection: Selection::from_rect(110.0, 60.0, 400.0, 300.0),
+            paintable_rect: Rect::new(10.0, 10.0, 960.0, 540.0),
+            stream_size,
+        }
+    }
+
+    #[test]
+    fn crop_from_selection() {
+        // Scale 2 on both axes: the selection minus the paintable origin is
+        // (100, 50, 400, 300), which scaled is (200, 100, 800, 600).
+        assert_eq!(
+            compute_crop(&select_area_data((1920, 1080))),
+            Crop {
+                top: 100,
+                left: 200,
+                right: 920,
+                bottom: 380,
+                frame: (1920, 1080),
+            }
+        );
+    }
+
+    #[test]
+    fn odd_stream_size_uses_even_frame() {
+        gst::init().unwrap();
+
+        let crop = compute_crop(&select_area_data((1921, 1081)));
+        assert_eq!(crop.frame, (1920, 1080));
+
+        // The frame is what `videoscale` hands to `videocrop`.
+        let caps = videoscale_caps((1921, 1081));
+        let structure = caps.structure(0).unwrap();
+        assert_eq!(
+            (
+                structure.get::<i32>("width").unwrap(),
+                structure.get::<i32>("height").unwrap()
+            ),
+            crop.frame
+        );
     }
 
     /// Names of the elements downstream of `element`, following `src` pads.

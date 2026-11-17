@@ -14,6 +14,7 @@ use std::cell::{Cell, RefCell};
 use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
     Application,
+    area_border::AreaBorder,
     camera_pip::{self, devices::CameraSource},
     cancelled::Cancelled,
     capture_warnings::{CaptureWarnings, WarningsNotifier},
@@ -72,6 +73,8 @@ mod imp {
         pub(super) recording: RefCell<Option<(Recording, Vec<glib::SignalHandlerId>)>>,
         /// The last whole second of the recording duration sent to the tray.
         pub(super) tray_duration_secs: Cell<u64>,
+        /// The border of the recorded area, while it is on screen.
+        pub(super) area_border: RefCell<Option<AreaBorder>>,
     }
 
     #[glib::object_subclass]
@@ -619,6 +622,7 @@ impl Window {
 
         self.update_warnings_boxes();
         self.update_tray();
+        self.update_area_border(state);
 
         self.action_set_enabled(
             "win.toggle-record",
@@ -638,6 +642,41 @@ impl Window {
                 RecordingState::Delayed { .. } | RecordingState::Flushing { .. }
             ),
         );
+    }
+
+    /// Shows the border of the recorded area during the countdown, the
+    /// recording and the pause (P14), once per recording; removes it in any
+    /// other state.
+    fn update_area_border(&self, state: RecordingState) {
+        let imp = self.imp();
+
+        if !shows_area_border(state) {
+            // Dropping it destroys the layer.
+            imp.area_border.take();
+            return;
+        }
+
+        if imp.area_border.borrow().is_some() {
+            return;
+        }
+
+        let Some((border, monitor)) = imp
+            .recording
+            .borrow()
+            .as_ref()
+            .and_then(|(recording, _)| recording.area_border())
+        else {
+            return;
+        };
+
+        if let Err(reason) = overlay::availability() {
+            tracing::debug!(?reason, "No area border: overlays are unavailable");
+            return;
+        }
+
+        let area_border = AreaBorder::new(border, &monitor);
+        area_border.present();
+        imp.area_border.replace(Some(area_border));
     }
 
     fn update_warnings_boxes(&self) {
@@ -790,6 +829,15 @@ fn camera_menu(sources: &[CameraSource]) -> gio::Menu {
     menu
 }
 
+/// Whether the border of the recorded area is on screen in `state`: during
+/// the countdown, the recording and the pause (P14).
+fn shows_area_border(state: RecordingState) -> bool {
+    matches!(
+        state,
+        RecordingState::Delayed { .. } | RecordingState::Recording | RecordingState::Paused
+    )
+}
+
 /// One label per capture warning, styled as a chip.
 fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
     warnings
@@ -824,6 +872,24 @@ mod tests {
     #[gtk::test]
     fn no_warning_chips_without_warnings() {
         assert!(warning_chips(CaptureWarnings::default()).is_empty());
+    }
+
+    #[test]
+    fn area_border_shows_from_countdown_until_stop() {
+        for state in [
+            RecordingState::Delayed { secs_left: 3 },
+            RecordingState::Recording,
+            RecordingState::Paused,
+        ] {
+            assert!(shows_area_border(state), "{state:?}");
+        }
+        for state in [
+            RecordingState::Init,
+            RecordingState::Flushing { progress: 50 },
+            RecordingState::Finished,
+        ] {
+            assert!(!shows_area_border(state), "{state:?}");
+        }
     }
 
     #[gtk::test]

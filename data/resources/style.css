@@ -35,6 +35,10 @@ window.camera-pip {
   background: none;
 }
 
+window.area-border {
+  background: none;
+}
+
 window.area-selector .view-port {
   padding: 12px;
   padding-top: 6px;

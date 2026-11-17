@@ -25,6 +25,7 @@
 
 mod about;
 mod application;
+mod area_border;
 mod area_selector;
 mod camera_pip;
 mod cancelled;

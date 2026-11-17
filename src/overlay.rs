@@ -103,8 +103,6 @@ pub fn set_margins(window: &gtk::Window, left: i32, top: i32) {
 
 /// Stretches an overlay over its whole monitor.
 #[cfg(feature = "layer-shell")]
-// The area border (chunk 5) is the first user.
-#[allow(dead_code)]
 pub fn anchor_all_edges(window: &gtk::Window) {
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);

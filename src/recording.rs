@@ -15,12 +15,14 @@ use anyhow::{Context, Error, Result, ensure};
 use gettextrs::gettext;
 use gst::prelude::*;
 use gtk::{
+    gdk,
     gio::{self, prelude::*},
     glib::{self, clone, closure_local, subclass::prelude::*},
 };
 
 use crate::{
     application::Application,
+    area_border::{self, geometry::BorderGeometry},
     area_selector::AreaSelector,
     cancelled::Cancelled,
     capture_warnings::CaptureWarnings,
@@ -28,7 +30,7 @@ use crate::{
     help::ContextWithHelp,
     i18n::gettext_f,
     pause_gate::PauseGate,
-    pipeline::PipelineBuilder,
+    pipeline::{PipelineBuilder, compute_crop},
     profile::Profile,
     screencast_portal::{
         CursorMode, PersistMode, Proxy, Session, SourceType, Stream, WindowIdentifier,
@@ -156,6 +158,7 @@ mod imp {
         pub(super) duration_source_id: RefCell<Option<glib::SourceId>>,
         pub(super) pipeline: OnceCell<gst::Pipeline>,
         pub(super) bus_watch_guard: RefCell<Option<BusWatchGuard>>,
+        pub(super) area_border: RefCell<Option<(BorderGeometry, gdk::Monitor)>>,
     }
 
     #[glib::object_subclass]
@@ -205,6 +208,12 @@ glib::wrapper! {
 impl Recording {
     pub fn new() -> Self {
         glib::Object::new()
+    }
+
+    /// The border of the selected area and the monitor it goes on, if the
+    /// recording captures a selection of a whole monitor.
+    pub fn area_border(&self) -> Option<(BorderGeometry, gdk::Monitor)> {
+        self.imp().area_border.borrow().clone()
     }
 
     /// Sets what runs right before the capture begins; the camera `PiP`
@@ -289,6 +298,8 @@ impl Recording {
         // Select area
         if config.capture_mode == CaptureMode::Selection {
             let data = AreaSelector::select(raw_fd, &streams, &Application::get().window()).await?;
+            imp.area_border
+                .replace(area_border::for_streams(&streams, compute_crop(&data)));
             pipeline_builder.select_area_data(data);
         }
 
