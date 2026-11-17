@@ -327,6 +327,26 @@ msgstr "Grabación de pantalla finalizada"
 msgid "Show in Files"
 msgstr "Mostrar en Archivos"
 
+#: src/application.rs:158
+msgid "Recording started"
+msgstr "Grabación iniciada"
+
+#: src/capture_warnings.rs:39
+msgid "Without audio"
+msgstr "Sin audio"
+
+#: src/capture_warnings.rs:40
+msgid "Without desktop audio"
+msgstr "Sin audio del escritorio"
+
+#: src/capture_warnings.rs:41
+msgid "Without microphone"
+msgstr "Sin micrófono"
+
+#: src/capture_warnings.rs:45
+msgid "Without mouse pointer"
+msgstr "Sin puntero del mouse"
+
 #: src/device.rs:26
 msgid "Failed to find the default audio device"
 msgstr "No se pudo encontrar el dispositivo de audio predeterminado"

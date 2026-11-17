@@ -7,6 +7,7 @@ data/resources/ui/shortcuts.ui
 data/resources/ui/window.ui
 src/about.rs
 src/application.rs
+src/capture_warnings.rs
 src/device.rs
 src/format.rs
 src/main.rs

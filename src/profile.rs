@@ -245,22 +245,13 @@ fn parse_bin_inner(
 mod tests {
     use super::*;
 
-    use std::{collections::HashSet, sync::Once};
+    use std::collections::HashSet;
 
-    use crate::config::RESOURCES_FILE;
-
-    fn init_gresources() {
-        static INIT: Once = Once::new();
-
-        INIT.call_once(|| {
-            let res = gio::Resource::load(RESOURCES_FILE).unwrap();
-            gio::resources_register(&res);
-        });
-    }
+    use crate::settings::test_utils::init_resources;
 
     #[test]
     fn profiles_fields_validity() {
-        init_gresources();
+        init_resources();
 
         let mut unique = HashSet::new();
 
@@ -284,7 +275,7 @@ mod tests {
 
     #[test]
     fn profiles_validity() {
-        init_gresources();
+        init_resources();
         gst::init().unwrap();
         gstgif::plugin_register_static().unwrap();
 

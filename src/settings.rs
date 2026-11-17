@@ -151,43 +151,98 @@ impl Settings {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_utils {
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process::Command,
+        sync::{Mutex, MutexGuard, Once, PoisonError},
+    };
 
-    use std::{env, process::Command, sync::Once};
+    use gtk::{gio, prelude::*};
 
-    fn setup_schema() {
+    use super::Settings;
+    use crate::config::{APP_ID, GETTEXT_PACKAGE, RESOURCES_FILE};
+
+    /// Compiles the app schema into a temporary directory and points
+    /// `GSettings` at it, with the in-memory backend.
+    pub(crate) fn setup_schema() {
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
-            let schema_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/data");
+            let template = include_str!("../data/io.github.seadve.Kooha.gschema.xml.in");
+            let schema = template
+                .replace("@app-id@", APP_ID)
+                .replace("@gettext-package@", GETTEXT_PACKAGE);
+
+            let schema_dir =
+                env::temp_dir().join(format!("kooha-test-schemas-{}", std::process::id()));
+            fs::create_dir_all(&schema_dir).unwrap();
+            fs::write(schema_dir.join(format!("{APP_ID}.gschema.xml")), schema).unwrap();
 
             let output = Command::new("glib-compile-schemas")
-                .arg(schema_dir)
+                .arg(&schema_dir)
                 .output()
                 .unwrap();
-
-            if !output.status.success() {
-                panic!(
-                    "Failed to compile GSchema for tests; stdout: {}; stderr: {}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
+            assert!(
+                output.status.success(),
+                "Failed to compile GSchema for tests: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
 
             unsafe {
-                env::set_var("GSETTINGS_SCHEMA_DIR", schema_dir);
+                env::set_var("GSETTINGS_SCHEMA_DIR", &schema_dir);
                 env::set_var("GSETTINGS_BACKEND", "memory");
             }
         });
     }
 
+    /// Registers the app resources, from `KOOHA_TEST_RESOURCES` if set.
+    pub(crate) fn init_resources() {
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            let path =
+                env::var("KOOHA_TEST_RESOURCES").unwrap_or_else(|_| RESOURCES_FILE.to_string());
+            let res = gio::Resource::load(&path)
+                .unwrap_or_else(|err| panic!("Failed to load resources at `{path}`: {err}"));
+            gio::resources_register(&res);
+        });
+    }
+
+    /// Serializes the tests that use `Settings`, as they all share the
+    /// process-wide in-memory backend.
+    pub(crate) fn settings_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Points `saving-location` at a temporary directory, so that tests never
+    /// create the default recordings folder in the home directory.
+    pub(crate) fn temp_saving_location(settings: &Settings) -> PathBuf {
+        let dir = env::temp_dir().join(format!("kooha-test-recordings-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        settings.0.set("saving-location", &dir).unwrap();
+        dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_utils::*, *};
+
     #[test]
     fn default_profile() {
+        let _lock = settings_lock();
         setup_schema();
+        init_resources();
         gst::init().unwrap();
 
-        assert!(Settings::default().profile().is_some());
-        assert!(Settings::default().profile().unwrap().supports_audio());
+        let settings = Settings::default();
+        settings.reset_profile();
+
+        assert!(settings.profile().is_some());
+        assert!(settings.profile().unwrap().supports_audio());
     }
 }

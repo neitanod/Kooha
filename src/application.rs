@@ -7,6 +7,7 @@ use gtk::{
 
 use crate::{
     about,
+    capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
     format,
     preferences_dialog::PreferencesDialog,
@@ -147,6 +148,17 @@ impl Application {
         );
 
         self.send_notification(Some("record-success"), &notification);
+    }
+
+    pub fn send_capture_warnings_notification(&self, warnings: CaptureWarnings) {
+        if warnings.is_empty() {
+            return;
+        }
+
+        let notification = gio::Notification::new(&gettext("Recording started"));
+        notification.set_body(Some(&warnings.labels().join(" · ")));
+
+        self.send_notification(Some("capture-warnings"), &notification);
     }
 
     pub fn run(&self) -> glib::ExitCode {

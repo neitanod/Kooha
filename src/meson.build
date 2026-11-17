@@ -62,6 +62,7 @@ test(
   ],
   env: [
     'RUST_BACKTRACE=1',
+    'KOOHA_TEST_RESOURCES=' + meson.project_build_root() / 'data' / 'resources' / 'resources.gresource',
     cargo_env
   ],
   timeout: 300, # give cargo more time
@@ -78,6 +79,7 @@ test(
     'warnings'
   ],
   env: [
+    'KOOHA_TEST_RESOURCES=' + meson.project_build_root() / 'data' / 'resources' / 'resources.gresource',
     cargo_env
   ],
   timeout: 300, # give cargo more time

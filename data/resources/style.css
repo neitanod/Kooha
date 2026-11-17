@@ -19,6 +19,14 @@ label.paused {
   animation-duration: 1s;
 }
 
+label.capture-warning {
+  background-color: color-mix(in srgb, var(--warning-bg-color) 15%, transparent);
+  color: var(--warning-color);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: bold;
+}
+
 button.copy-done {
   color: var(--accent-bg-color);
 }

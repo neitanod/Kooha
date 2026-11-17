@@ -172,6 +172,17 @@
                   </object>
                 </child>
                 <child>
+                  <object class="GtkFlowBox" id="recording_warnings_box">
+                    <property name="visible">False</property>
+                    <property name="selection-mode">none</property>
+                    <property name="halign">center</property>
+                    <property name="max-children-per-line">2</property>
+                    <property name="column-spacing">6</property>
+                    <property name="row-spacing">6</property>
+                    <property name="margin-bottom">12</property>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkBox">
                     <style>
                       <class name="linked"/>
@@ -225,6 +236,16 @@
                         <style>
                           <class name="large-time"/>
                         </style>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkFlowBox" id="delay_warnings_box">
+                        <property name="visible">False</property>
+                        <property name="selection-mode">none</property>
+                        <property name="halign">center</property>
+                        <property name="max-children-per-line">2</property>
+                        <property name="column-spacing">6</property>
+                        <property name="row-spacing">6</property>
                       </object>
                     </child>
                   </object>

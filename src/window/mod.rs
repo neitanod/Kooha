@@ -15,6 +15,7 @@ use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
     Application,
     cancelled::Cancelled,
+    capture_warnings::{CaptureWarnings, WarningsNotifier},
     config::PROFILE,
     format,
     help::ContextWithHelp,
@@ -44,17 +45,22 @@ mod imp {
         #[template_child]
         pub(super) recording_time_label: TemplateChild<gtk::Label>,
         #[template_child]
+        pub(super) recording_warnings_box: TemplateChild<gtk::FlowBox>,
+        #[template_child]
         pub(super) pause_record_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub(super) delay_page: TemplateChild<gtk::Box>,
         #[template_child]
         pub(super) delay_label: TemplateChild<gtk::Label>,
         #[template_child]
+        pub(super) delay_warnings_box: TemplateChild<gtk::FlowBox>,
+        #[template_child]
         pub(super) flushing_page: TemplateChild<gtk::Box>,
         #[template_child]
         pub(super) flushing_progress_icon: TemplateChild<ProgressIcon>,
 
         pub(super) inhibit_cookie: RefCell<Option<u32>>,
+        pub(super) warnings_notifier: WarningsNotifier,
         pub(super) recording: RefCell<Option<(Recording, Vec<glib::SignalHandlerId>)>>,
     }
 
@@ -340,13 +346,29 @@ impl Window {
         }
 
         let recording = Recording::new();
+        imp.warnings_notifier.reset();
         let handler_ids = vec![
             recording.connect_state_notify(clone!(
                 #[weak(rename_to = obj)]
                 self,
-                move |_| {
+                move |recording| {
                     obj.update_view();
                     obj.update_inhibit();
+
+                    obj.imp().warnings_notifier.on_state(
+                        recording.state(),
+                        recording.capture_warnings(),
+                        |warnings| {
+                            Application::get().send_capture_warnings_notification(warnings);
+                        },
+                    );
+                }
+            )),
+            recording.connect_capture_warnings_notify(clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_| {
+                    obj.update_warnings_boxes();
                 }
             )),
             recording.connect_duration_notify(clone!(
@@ -403,6 +425,8 @@ impl Window {
         res: &Result<(gio::File, gst::ClockTime)>,
     ) {
         debug_assert_eq!(recording.state(), RecordingState::Finished);
+
+        Application::get().withdraw_notification("capture-warnings");
 
         match res {
             Ok((recording_file, duration)) => {
@@ -517,6 +541,8 @@ impl Window {
             }
         }
 
+        self.update_warnings_boxes();
+
         self.action_set_enabled(
             "win.toggle-record",
             !matches!(
@@ -535,6 +561,25 @@ impl Window {
                 RecordingState::Delayed { .. } | RecordingState::Flushing { .. }
             ),
         );
+    }
+
+    fn update_warnings_boxes(&self) {
+        let imp = self.imp();
+
+        let warnings = imp
+            .recording
+            .borrow()
+            .as_ref()
+            .map(|(recording, _)| recording.capture_warnings())
+            .unwrap_or_default();
+
+        for flow_box in [&*imp.recording_warnings_box, &*imp.delay_warnings_box] {
+            flow_box.remove_all();
+            for chip in warning_chips(warnings) {
+                flow_box.append(&chip);
+            }
+            flow_box.set_visible(!warnings.is_empty());
+        }
     }
 
     fn update_title_label(&self) {
@@ -625,5 +670,41 @@ impl Window {
         self.add_action(&settings.create_record_microphone_action());
         self.add_action(&settings.create_show_pointer_action());
         self.add_action(&settings.create_capture_mode_action());
+    }
+}
+
+/// One label per capture warning, styled as a chip.
+fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
+    warnings
+        .labels()
+        .into_iter()
+        .map(|label| {
+            let chip = gtk::Label::new(Some(&format!("⚠ {label}")));
+            chip.add_css_class("capture-warning");
+            chip
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gtk::test]
+    fn warning_chips_have_one_label_per_warning() {
+        let chips = warning_chips(CaptureWarnings::compute(true, true, false, false));
+
+        let texts = chips.iter().map(|chip| chip.label()).collect::<Vec<_>>();
+        assert_eq!(texts, ["⚠ Without microphone", "⚠ Without mouse pointer"]);
+        assert!(
+            chips
+                .iter()
+                .all(|chip| chip.has_css_class("capture-warning"))
+        );
+    }
+
+    #[gtk::test]
+    fn no_warning_chips_without_warnings() {
+        assert!(warning_chips(CaptureWarnings::default()).is_empty());
     }
 }

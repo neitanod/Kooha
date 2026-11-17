@@ -21,10 +21,12 @@ use crate::{
     application::Application,
     area_selector::AreaSelector,
     cancelled::Cancelled,
+    capture_warnings::CaptureWarnings,
     experimental::Feature,
     help::ContextWithHelp,
     i18n::gettext_f,
     pipeline::PipelineBuilder,
+    profile::Profile,
     screencast_portal::{
         CursorMode, PersistMode, Proxy, Session, SourceType, Stream, WindowIdentifier,
     },
@@ -44,6 +46,43 @@ impl fmt::Display for NoProfileError {
 }
 
 impl error::Error for NoProfileError {}
+
+/// Everything a recording reads from the settings, read once when it starts.
+#[derive(Debug, Clone)]
+pub struct CaptureConfig {
+    pub profile: &'static Profile,
+    pub record_desktop_audio: bool,
+    pub record_microphone: bool,
+    pub show_pointer: bool,
+    pub capture_mode: CaptureMode,
+    pub framerate: gst::Fraction,
+    pub record_delay: Duration,
+    pub saving_location: PathBuf,
+}
+
+impl CaptureConfig {
+    pub fn from_settings(settings: &Settings) -> Result<Self> {
+        Ok(Self {
+            profile: settings.profile().context(NoProfileError)?,
+            record_desktop_audio: settings.record_desktop_audio(),
+            record_microphone: settings.record_microphone(),
+            show_pointer: settings.show_pointer(),
+            capture_mode: settings.capture_mode(),
+            framerate: settings.framerate(),
+            record_delay: settings.record_delay(),
+            saving_location: settings.saving_location(),
+        })
+    }
+
+    pub fn warnings(&self) -> CaptureWarnings {
+        CaptureWarnings::compute(
+            self.profile.supports_audio(),
+            self.record_desktop_audio,
+            self.record_microphone,
+            self.show_pointer,
+        )
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Boxed)]
 #[boxed_type(name = "KoohaRecordingState")]
@@ -81,6 +120,8 @@ mod imp {
         pub(super) state: Cell<RecordingState>,
         #[property(get)]
         pub(super) duration: Cell<gst::ClockTime>,
+        #[property(get)]
+        pub(super) capture_warnings: Cell<CaptureWarnings>,
 
         pub(super) file: OnceCell<gio::File>,
 
@@ -160,13 +201,16 @@ impl Recording {
         settings: &Settings,
     ) -> Result<()> {
         let imp = self.imp();
-        let profile = settings.profile().context(NoProfileError)?;
+        let config = CaptureConfig::from_settings(settings)?;
+
+        imp.capture_warnings.set(config.warnings());
+        self.notify_capture_warnings();
 
         // Setup screencast session
         let restore_token = settings.screencast_restore_token();
         settings.reset_screencast_restore_token();
         let (screencast_session, streams, restore_token, fd) = new_screencast_session(
-            if settings.show_pointer() {
+            if config.show_pointer {
                 CursorMode::EMBEDDED
             } else {
                 CursorMode::HIDDEN
@@ -196,28 +240,29 @@ impl Recording {
         imp.session.replace(Some(screencast_session));
         settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
 
-        let file_path = new_recording_path(&settings.saving_location(), profile.file_extension());
+        let file_path =
+            new_recording_path(&config.saving_location, config.profile.file_extension());
         imp.file.set(gio::File::for_path(&file_path)).unwrap();
 
         let raw_fd = fd.into_raw_fd();
 
         let mut pipeline_builder = PipelineBuilder::new(
             file_path,
-            settings.framerate(),
-            profile.clone(),
+            config.framerate,
+            config.profile.clone(),
             raw_fd,
             streams.clone(),
         );
 
         // Select area
-        if settings.capture_mode() == CaptureMode::Selection {
+        if config.capture_mode == CaptureMode::Selection {
             let data = AreaSelector::select(raw_fd, &streams, &Application::get().window()).await?;
             pipeline_builder.select_area_data(data);
         }
 
-        if profile.supports_audio() {
-            pipeline_builder.record_desktop_audio(settings.record_desktop_audio());
-            pipeline_builder.record_microphone(settings.record_microphone());
+        if config.profile.supports_audio() {
+            pipeline_builder.record_desktop_audio(config.record_desktop_audio);
+            pipeline_builder.record_microphone(config.record_microphone);
         }
 
         // Build pipeline
@@ -231,7 +276,7 @@ impl Recording {
 
         // Setup and run timer
         let timer = Timer::new(
-            settings.record_delay(),
+            config.record_delay,
             clone!(
                 #[weak(rename_to = obj)]
                 self,
@@ -682,4 +727,43 @@ fn new_recording_path(saving_location: &Path, extension: impl AsRef<OsStr>) -> P
     path.set_extension(extension);
 
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::settings::test_utils::{
+        init_resources, settings_lock, setup_schema, temp_saving_location,
+    };
+
+    #[test]
+    fn config_is_a_snapshot() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        for key in [
+            "profile-id",
+            "record-desktop-audio",
+            "record-microphone",
+            "show-pointer",
+        ] {
+            settings.reset(key);
+        }
+        let saving_location = temp_saving_location(&settings);
+        settings.set_record_desktop_audio(true);
+        settings.set_record_microphone(false);
+
+        let config = CaptureConfig::from_settings(&settings).unwrap();
+        settings.set_record_microphone(true);
+
+        assert!(!config.record_microphone);
+        assert_eq!(config.saving_location, saving_location);
+        assert_eq!(config.warnings().labels(), ["Without microphone"]);
+
+        settings.reset("saving-location");
+    }
 }

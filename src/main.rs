@@ -27,6 +27,7 @@ mod about;
 mod application;
 mod area_selector;
 mod cancelled;
+mod capture_warnings;
 mod config;
 mod device;
 mod experimental;
