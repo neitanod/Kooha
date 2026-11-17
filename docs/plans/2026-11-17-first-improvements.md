@@ -135,8 +135,8 @@ el grafo es una cadena: una tanda por chunk, un chunk por tanda.
 | 1 | Avisos de captura | — | 1 | `src/capture_warnings.rs` | `src/settings.rs` (test), `src/profile.rs` (test), `src/meson.build`, `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `data/resources/style.css`, `src/application.rs`, `src/main.rs`, `po/POTFILES.in`, `po/es.po` |
 | 2 | Ícono de bandeja | 1 | 2 | `src/tray/mod.rs`, `src/tray/model.rs`, `src/tray/service.rs` | `Cargo.toml`, `Cargo.lock`, `src/application.rs`, `src/window/mod.rs`, `src/main.rs`, `po/*` |
 | 3 | Pausa | 2 | 3 | `src/pause_gate.rs` | `Cargo.toml`, `Cargo.lock` (`gstreamer-pbutils` de desarrollo), `src/pipeline.rs`, `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `data/resources/ui/shortcuts.ui`, `src/application.rs`, schema, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/tray/*`, `po/*` |
-| 4 | PiP de cámara | 3 | 4 | `src/overlay.rs`, `src/camera_pip/{mod,geometry,devices,view}.rs` | `Cargo.toml`, `meson.build`, `meson_options.txt`, `src/meson.build`, schema, `src/application.rs`, `src/window/mod.rs`, `window.ui`, `preferences_dialog.*`, `src/tray/*`, `po/*` |
-| 5 | Borde del área | 4 | 5 | `src/area_border/{mod,geometry,view}.rs` | `src/pipeline.rs`, `src/recording.rs`, `src/application.rs`, `po/*` |
+| 4 | PiP de cámara | 3 | 4 | `src/overlay.rs`, `src/camera_pip/{mod,geometry,devices,view}.rs` | `Cargo.toml`, `meson.build`, `meson_options.txt`, `src/meson.build`, schema, `src/application.rs`, `src/window/mod.rs`, `src/recording.rs`, `window.ui`, `style.css`, `preferences_dialog.*`, `src/tray/*`, `po/*` |
+| 5 | Borde del área | 4 | 5 | `src/area_border/{mod,geometry,view}.rs` | `src/pipeline.rs`, `src/recording.rs`, `src/window/mod.rs`, `src/application.rs`, `style.css`, `po/*` |
 | 6 | Reporte de requisitos | 5 | 6 | `src/doctor/{mod,checks,dialog}.rs` | `src/main.rs`, `src/application.rs`, `src/window/mod.rs`, `window.ui`, `preferences_dialog.rs`, `po/*` |
 
 **Cómo se entrega cada chunk:** el subagente trabaja en `wt/c<N>`, rama
@@ -419,6 +419,9 @@ fn update_warnings_boxes(&self) {
 
 **Archivos:** modificar `src/application.rs` y `src/window/mod.rs`.
 
+**Orden TDD** (codex r4 #2): escribir primero los tests de los pasos 2 y 3 y verlos fallar;
+después los pasos 1 y 4.
+
 - [ ] **Paso 1:** en `Application`, siguiendo el modelo de `send_record_success_notification`:
 
 ```rust
@@ -596,6 +599,10 @@ impl ksni::Tray for KoohaTray {
 
 **Archivos:** modificar `src/application.rs`, `src/window/mod.rs`, `src/main.rs` (`mod tray;`).
 
+**Orden TDD** (codex r4 #2): escribir primero los tres tests del paso 4 y verlos fallar
+(no compilan, porque `tray_model`, `apply_tray_command` y `update_tray(snapshot)` no existen);
+después los pasos 1 a 3.
+
 - [ ] **Paso 1:** en `imp::Application`, `tray: OnceCell<TrayService>`. En `startup`, crear el
   canal `futures_channel::mpsc::unbounded()`, hacer `TrayService::spawn(sender)` y lanzar con
   `glib::spawn_future_local` un bucle que recibe `TrayCommand` y los despacha en el hilo de
@@ -638,7 +645,7 @@ impl ksni::Tray for KoohaTray {
   `register()` ni `run()`: eso correría `startup`, tomaría el nombre D-Bus de Kooha y pondría un
   ícono en la bandeja real de Sebastián (fable r3 #3). `update_tray` no hace nada si el tray
   todavía no existe.
-  Test `apply_tray_command_syncs_window_action` (codex r3 #3): la función
+  Test `apply_tray_command_syncs_window_action` (codex r3 #3), con `setup_schema()`: la función
   `apply_tray_command(cmd, &settings, has_recording) -> bool`, que despacha los toggles,
   cambia `record-microphone`, y la acción `settings.create_record_microphone_action()` —la
   misma que usa la ventana— refleja el estado nuevo; con `has_recording = true` no cambia
@@ -807,6 +814,9 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
 
 **Archivos:** `src/recording.rs`.
 
+**Orden TDD** (codex r4 #2): escribir primero los tests del paso 4b (`flushing_progress` y el
+pipeline atrasado) y verlos fallar; después los pasos 1 a 5.
+
 - [ ] **Paso 1:** `imp::Recording` guarda un `PauseGate`. `start_inner` se lo pasa al
   `PipelineBuilder` y, si la foto de configuración lo dice, activa el destello: agregar
   `pause_flash: bool` a `CaptureConfig` (tarea 1.3).
@@ -832,8 +842,11 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
     `videotestsrc is-live=true ! identity name=gate ! queue ! identity sleep-time=40000 ! fakesink sync=false`
     (cada buffer tarda 40 ms en pasar, más que los 33 ms entre cuadros, así la cola se llena).
     Grabar 1 s, detener (EOS) y muestrear `flushing_progress(query_position, estimated)` cada
-    50 ms hasta el EOS: el primer valor es menor que 100, los valores no bajan, y el último es
-    100. Lo mismo deteniendo en pausa.
+    50 ms hasta el EOS: el primer valor es menor que 100 y los valores no bajan. La última
+    muestra periódica puede quedar abajo de 100 (Codex midió 93–96 % en tres corridas); la
+    aserción final es sobre el procesamiento del EOS, que hoy fija el progreso en 100
+    (`src/recording.rs` línea 525) y tiene que seguir haciéndolo (codex r4 #3). Lo mismo
+    deteniendo en pausa.
   - `stop()`: `estimated_final_duration = gate.recorded_duration(current_running_time)`;
     después de `set_state(Flushing)`, llamar `update_duration()` (que en `Flushing` ya lee
     `query_position`) **antes** de `update_flushing_progress()`.
@@ -1066,7 +1079,10 @@ esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para 
   `surface.connect_enter_monitor`, gdk4 0.11.2 `src/auto/surface.rs` línea 274: en Wayland el
   compositor avisa en qué monitor está la superficie recién después del primer commit, así que
   consultarlo en `map` daría el monitor del origen; fable r3 #1); si no, el primero de la
-  lista —, posición
+  lista —, posición. Si `camera-monitor` está vacío y el PiP ya está prendido cuando llega
+  `set_kooha_monitor` (Kooha abrió con la cámara prendida desde `startup`, antes de que exista
+  la ventana), el `CameraPip` recrea la ventana-capa en ese monitor y hace `relayout()`
+  (fable r4 #2) —
   `camera-position` (si es `(-1,-1)`, `default_position`), `clamp_position`, y `present()`.
 - **Apagar**: pipeline a `NULL`, `window.destroy()`.
 - **Mover**: `GestureDrag` con botón 1. En cada `drag-update`, como la superficie se mueve con el
@@ -1089,20 +1105,22 @@ esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para 
   basta con que GTK vuelva a dibujar la ventana.
   - `should_mirror(recording_active: bool) -> bool`.
   - `CameraPip::prepare_for_recording(&self) -> impl Future<Output = anyhow::Result<()>>`:
-    pone `mirrored = false` y espera una **barrera de presentación** (codex r3 #1): anota el
-    `frame_counter()` del `gdk::FrameClock` de la ventana del PiP en el momento del cambio,
-    pide cuadros con `frame_clock.request_phase(gdk::FrameClockPhase::PAINT)` en cada
-    `after-paint` hasta resolver (el reloj no pide cuadros solo: Gdk-4.0.gir, línea 11549), y
-    resuelve cuando `frame_clock.timings(n)` de un cuadro `n` posterior al cambio tiene
-    `is_complete()` y `presentation_time() > 0`, es decir, cuando el compositor informó que lo
-    presentó (`FrameTimings::presentation_time`, gdk4 0.11.2, `src/auto/frame_timings.rs`
-    línea 44). Si el compositor no informa tiempos de presentación (`presentation_time() == 0`
-    en cuadros completos), alcanza con el segundo cuadro completo posterior al cambio.
+    pone `mirrored = false`, llama `pip_view.queue_draw()` y espera una **barrera de
+    presentación** (codex r3 #1 y r4 #1): anota el `frame_counter()` del `gdk::FrameClock` de
+    la ventana del PiP en el momento del cambio; en cada `after-paint` pendiente vuelve a llamar
+    `pip_view.queue_draw()` **y** `frame_clock.request_phase(gdk::FrameClockPhase::PAINT)` (son
+    cosas distintas: una invalida el dibujo, la otra hace correr el reloj; Gtk-4.0.gir línea
+    179740, Gdk-4.0.gir línea 11549); y resuelve **sólo** cuando `frame_clock.timings(n)` de un
+    cuadro `n` posterior al cambio tiene `is_complete()` y `presentation_time() > 0`, es decir,
+    cuando el compositor confirmó que lo presentó (`FrameTimings::presentation_time`, gdk4
+    0.11.2, `src/auto/frame_timings.rs` línea 44). Un cuadro completo con
+    `presentation_time() == 0` es presentación desconocida (Gdk-4.0.gir línea 12060) y la
+    barrera sigue en `Pending`.
   - La decisión vive en una máquina de estados pura, `PresentationBarrier`, que recibe
     `(frame_counter, complete, presentation_time)` y contesta `Pending` o `Done`. **Tests
     primero:** cuadros anteriores al cambio no la resuelven; un cuadro posterior completo pero
-    sin presentar tampoco; uno presentado sí; sin tiempos de presentación, el segundo cuadro
-    completo sí; un cuadro presentado que llega tarde (después de varios `Pending`) también.
+    con `presentation_time` 0 tampoco, ni aunque lleguen varios seguidos; uno presentado sí;
+    un cuadro presentado que llega tarde (después de varios `Pending`) también.
   - **Tope de 1 s.** Si vence con el PiP mapeado, `prepare_for_recording` devuelve `Err`, y el
     gancho lo propaga: `start_inner` falla con el contexto «The camera overlay did not refresh
     in time», la grabación no arranca y se muestra el diálogo de error. Es la alternativa que
@@ -1420,7 +1438,9 @@ pipeline, y falla si alguno cae fuera de la tabla.
   según `has_failures()`. Agregar `#[allow(clippy::print_stdout)]` local, porque `main.rs`
   lo prohíbe a nivel de crate. Prueba (criterio F2), con el ejecutor aislado y sin display
   (codex r3 #2, fable r3 #2):
-  `env -u WAYLAND_DISPLAY -u DISPLAY /home/sebas/robotin/apps/kooha/.workspace/t-1088-first-improvements/run-dev.sh <worktree> --check`
+  `env -u DISPLAY WAYLAND_DISPLAY=kooha-no-display /home/sebas/robotin/apps/kooha/.workspace/t-1088-first-improvements/run-dev.sh <worktree> --check`
+  (sin `WAYLAND_DISPLAY`, libwayland prueba `wayland-0`, que es la sesión de Sebastián; con un
+  nombre de socket inexistente GDK no consigue display; fable r4 #1)
   imprime el reporte, no abre ventanas, y el chequeo «Screen overlays» sale `[FAIL]` compilado
   sin el feature y `[WARN]` con el feature. Las dos variantes se compilan y se prueban.
 - [ ] La ayuda de `--check` en `--help`: si `GApplication` rechaza la opción desconocida,
@@ -1443,7 +1463,11 @@ de punta a punta no se puede hacer en un Xvfb. Se hace en la sesión de Sebasti�
 ejecutor de desarrollo (`run-dev.sh`), que usa los recursos, el schema y un archivo de
 preferencias propios del worktree, así que no pisa la configuración, la selección ni el token
 del portal del Kooha instalado (codex r1 #1 y #3). Recorrido: los criterios A1 a F2 de la spec, con
-capturas de pantalla de cada mejora y un video corto grabado con pausa y PiP.
+capturas de pantalla de cada mejora y un video corto grabado con pausa y PiP. Casos que se
+prueban además a propósito: el PiP en cada uno de los tres monitores; la primera vez con
+Kooha en `eDP-1`, `camera-monitor` vacío y la cámara prendida desde el arranque; una
+grabación con demora 0 mirando el primer cuadro del archivo; otra con la cámara tapada o
+trabada; y el borde en `eDP-1` (escala 1,75).
 
 ## Riesgos
 
@@ -1453,4 +1477,5 @@ capturas de pantalla de cada mejora y un video corto grabado con pausa y PiP.
 | `videobalance` no acepta el formato que entrega `pipewiresrc` | El test 3.3 usa `BGRx`, el formato habitual; si falla en la sesión real, agregar `videoconvert` antes del `videobalance` |
 | `gsettings-macro` no genera `(ii)` | Saltear la clave y escribir los métodos a mano (tarea 4.4) |
 | El portal de KDE no informa `position()` del stream | Con un solo monitor se usa ese; con varios, no hay borde y se loguea (Sebastián tiene tres: la etapa 8 lo comprueba) |
-| La captura toma un cuadro del PiP todavía espejado | El espejo se hace al dibujar, y `prepare_for_recording` espera dos `after-paint` antes de la cuenta regresiva (tarea 4.4) |
+| La captura toma un cuadro del PiP todavía espejado | El espejo se hace al dibujar, y `prepare_for_recording` espera la presentación confirmada antes de la cuenta regresiva; si no llega en 1 s, la grabación no arranca (tarea 4.4) |
+| Un compositor sin el protocolo de tiempos de presentación nunca confirma el cuadro | Con el PiP prendido, la grabación no arranca y el error lo explica. KWin lo informa; la etapa 8 lo comprueba. Si fallara, se decide con Sebastián |
