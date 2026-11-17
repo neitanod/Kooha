@@ -8,6 +8,7 @@ use gtk::{
 };
 
 use crate::{
+    application::Application,
     camera_pip::{
         self,
         devices::{self, CameraSource},
@@ -330,6 +331,27 @@ impl PreferencesDialog {
 
         imp.camera_group
             .set_title(&glib::markup_escape_text(&gettext("Camera & Overlays")));
+
+        // Over a window that cannot be resized, the dialog is shown as a
+        // window of its own, without the app, where an `app.` action name
+        // does not resolve and leaves the button insensitive (fable code r1
+        // #1). The report opens over the Kooha window, so this dialog closes
+        // first instead of staying on top of it.
+        imp.open_report_button.connect_clicked(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                if obj.root().is_some() {
+                    obj.close();
+                }
+                // Through the action map: `ActionGroup` activation also
+                // needs the app registered, which a test cannot do.
+                match Application::get().lookup_action("show-requirements-report") {
+                    Some(action) => action.activate(None),
+                    None => tracing::warn!("No `show-requirements-report` action"),
+                }
+            }
+        ));
 
         if let Err(reason) = overlay::availability() {
             imp.overlays_warning_row.set_visible(true);
@@ -963,8 +985,39 @@ mod tests {
         ] {
             assert_eq!(row.is_sensitive(), availability.is_ok());
         }
-        // Connected with the requirements report.
-        assert!(!imp.open_report_button.is_visible());
+        // Reads the button's own `visible`: its row is hidden when overlays
+        // are available.
+        assert!(imp.open_report_button.get_visible());
+
+        reset_camera_keys(&settings);
+    }
+
+    /// The dialog may be shown as a window of its own, without the app, so
+    /// the button reaches the app action through `Application` (fable code
+    /// r1 #1).
+    #[gtk::test]
+    fn open_report_button_activates_app_action() {
+        use std::{cell::Cell, rc::Rc};
+
+        let _lock = settings_lock();
+        let (settings, dialog) = camera_dialog();
+
+        let app = crate::application::Application::new();
+        app.set_default();
+        let activations = Rc::new(Cell::new(0));
+        let action = gio::SimpleAction::new("show-requirements-report", None);
+        action.connect_activate(clone!(
+            #[strong]
+            activations,
+            move |_, _| activations.set(activations.get() + 1)
+        ));
+        app.add_action(&action);
+
+        let button = dialog.imp().open_report_button.get();
+        assert_eq!(button.action_name(), None);
+        button.emit_clicked();
+
+        assert_eq!(activations.get(), 1);
 
         reset_camera_keys(&settings);
     }

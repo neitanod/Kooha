@@ -73,8 +73,6 @@
                 </child>
                 <child type="suffix">
                   <object class="GtkButton" id="open_report_button">
-                    <!-- Shown once the requirements report exists. -->
-                    <property name="visible">False</property>
                     <property name="valign">center</property>
                     <property name="label" translatable="yes">Open Report</property>
                   </object>

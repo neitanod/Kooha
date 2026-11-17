@@ -32,6 +32,7 @@ mod cancelled;
 mod capture_warnings;
 mod config;
 mod device;
+mod doctor;
 mod experimental;
 mod format;
 mod help;
@@ -49,12 +50,15 @@ mod timer;
 mod tray;
 mod window;
 
+use std::{env, ffi::OsString};
+
 use gettextrs::{LocaleCategory, gettext};
-use gtk::{gio, glib};
+use gtk::{gio, glib, prelude::*};
 
 use self::{
     application::Application,
     config::{GETTEXT_PACKAGE, LOCALEDIR, RESOURCES_FILE},
+    settings::Settings,
 };
 
 fn main() -> glib::ExitCode {
@@ -73,6 +77,65 @@ fn main() -> glib::ExitCode {
     let res = gio::Resource::load(RESOURCES_FILE).expect("Could not load gresource file.");
     gio::resources_register(&res);
 
+    if check_requested(env::args_os()) {
+        return run_check();
+    }
+
     let app = Application::new();
+    // Handled above, before GTK starts; registered so that `--help` lists it.
+    app.add_main_option(
+        "check",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        &gettext("Print the requirements report and exit"),
+        None,
+    );
     app.run()
+}
+
+/// Whether `kooha --check` was asked for. `args` includes the program name.
+fn check_requested(args: impl IntoIterator<Item = OsString>) -> bool {
+    args.into_iter().skip(1).any(|arg| arg == "--check")
+}
+
+/// `kooha --check`: prints the requirements report without opening any
+/// window, and fails when a check failed.
+#[allow(clippy::print_stdout)]
+fn run_check() -> glib::ExitCode {
+    // Without a display GTK does not start, and `overlay::availability()`
+    // then says why overlays cannot be checked.
+    if let Err(err) = gtk::init() {
+        tracing::debug!("Checking without GTK: {:?}", err);
+    }
+
+    let settings = Settings::default();
+    let report =
+        glib::MainContext::default().block_on(doctor::run(&settings, overlay::availability()));
+    print!("{}", report.to_text());
+
+    if report.has_failures() {
+        glib::ExitCode::FAILURE
+    } else {
+        glib::ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn check_flag() {
+        assert!(check_requested(args(&["kooha", "--check"])));
+        assert!(check_requested(args(&["kooha", "-v", "--check"])));
+        assert!(!check_requested(args(&["kooha"])));
+        assert!(!check_requested(args(&["kooha", "--checks"])));
+        // The program name itself does not count.
+        assert!(!check_requested(args(&["--check"])));
+    }
 }

@@ -11,6 +11,7 @@ use crate::{
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
+    doctor::dialog::RequirementsDialog,
     format, overlay,
     preferences_dialog::PreferencesDialog,
     settings::Settings,
@@ -378,6 +379,11 @@ impl Application {
                 dialog.present(Some(&obj.window()));
             })
             .build();
+        let show_requirements_report_action = gio::ActionEntry::builder("show-requirements-report")
+            .activate(|obj: &Self, _, _| {
+                RequirementsDialog::present_and_run(&obj.window(), obj.settings());
+            })
+            .build();
         let show_about_action = gio::ActionEntry::builder("show-about")
             .activate(|obj: &Self, _, _| {
                 about::present_dialog(&obj.window());
@@ -388,6 +394,7 @@ impl Application {
             show_in_files_action,
             quit_action,
             show_preferences_action,
+            show_requirements_report_action,
             show_about_action,
         ]);
     }
@@ -489,6 +496,19 @@ mod tests {
 
         assert!(window.recording_snapshot().is_none());
         assert!(app.imp().tray.get().is_none());
+    }
+
+    #[gtk::test]
+    fn requirements_report_action() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        app.setup_gactions();
+
+        assert!(app.lookup_action("show-requirements-report").is_some());
     }
 
     #[test]

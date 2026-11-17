@@ -10,6 +10,9 @@ src/application.rs
 src/camera_pip/caps.rs
 src/capture_warnings.rs
 src/device.rs
+src/doctor/checks.rs
+src/doctor/dialog.rs
+src/doctor/mod.rs
 src/format.rs
 src/main.rs
 src/preferences_dialog.rs

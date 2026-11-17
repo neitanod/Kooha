@@ -58,9 +58,7 @@ impl Settings {
             return stored_saving_location;
         }
 
-        let saving_location =
-            glib::user_special_dir(glib::UserDirectory::Videos).unwrap_or_else(glib::home_dir);
-
+        let saving_location = default_saving_location_parent();
         let kooha_saving_location = saving_location.join("Kooha");
 
         if let Err(err) = fs::create_dir_all(&kooha_saving_location) {
@@ -73,6 +71,17 @@ impl Settings {
         }
 
         kooha_saving_location
+    }
+
+    /// The stored recordings folder, or the default one, without creating it.
+    pub fn saving_location_unchecked(&self) -> PathBuf {
+        let stored_saving_location: PathBuf = self.0.get("saving-location");
+
+        if !stored_saving_location.as_os_str().is_empty() {
+            return stored_saving_location;
+        }
+
+        default_saving_location_parent().join("Kooha")
     }
 
     pub fn connect_saving_location_changed(
@@ -148,6 +157,10 @@ impl Settings {
     pub fn reset_profile(&self) {
         self.0.reset("profile-id");
     }
+}
+
+fn default_saving_location_parent() -> PathBuf {
+    glib::user_special_dir(glib::UserDirectory::Videos).unwrap_or_else(glib::home_dir)
 }
 
 #[cfg(test)]
@@ -236,6 +249,26 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::{test_utils::*, *};
+
+    #[test]
+    fn saving_location_unchecked_does_not_create() {
+        let _lock = settings_lock();
+        setup_schema();
+
+        let settings = Settings::default();
+        settings.reset("saving-location");
+
+        let missing = std::env::temp_dir().join(format!(
+            "kooha-test-missing-folder-{}/nested",
+            std::process::id()
+        ));
+        settings.0.set("saving-location", &missing).unwrap();
+        assert_eq!(settings.saving_location_unchecked(), missing);
+        assert!(!missing.exists());
+
+        settings.reset("saving-location");
+        assert!(settings.saving_location_unchecked().ends_with("Kooha"));
+    }
 
     #[test]
     fn default_profile() {

@@ -278,7 +278,13 @@ impl Window {
     }
 
     fn present_recording_error_dialog(&self, err: &Error) {
+        let dialog = self.recording_error_dialog(err);
+        dialog.present(Some(self));
+    }
+
+    fn recording_error_dialog(&self, err: &Error) -> adw::AlertDialog {
         const OK_RESPONSE_ID: &str = "ok";
+        const REPORT_RESPONSE_ID: &str = "report";
 
         let err_text = format!("{:?}", err);
 
@@ -346,8 +352,23 @@ impl Window {
             ));
         }
 
+        dialog.add_response(REPORT_RESPONSE_ID, &gettext("Open Requirements Report"));
         dialog.add_response(OK_RESPONSE_ID, &gettext("Ok, Got It"));
-        dialog.present(Some(self));
+        dialog.connect_response(
+            Some(REPORT_RESPONSE_ID),
+            clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_, _| {
+                    if let Err(err) =
+                        WidgetExt::activate_action(&obj, "app.show-requirements-report", None)
+                    {
+                        tracing::error!("Failed to open the requirements report: {:?}", err);
+                    }
+                }
+            ),
+        );
+        dialog
     }
 
     fn present_no_profile_error_dialog(&self) {
@@ -991,5 +1012,80 @@ mod tests {
                 Some("OBS".to_string())
             )
         );
+    }
+
+    /// The first primary menu button under `widget`, depth first.
+    fn primary_menu_button(widget: &gtk::Widget) -> Option<gtk::MenuButton> {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(button) = current
+                .downcast_ref::<gtk::MenuButton>()
+                .filter(|button| button.is_primary())
+            {
+                return Some(button.clone());
+            }
+            if let Some(button) = primary_menu_button(&current) {
+                return Some(button);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+
+    #[gtk::test]
+    fn primary_menu_lists_requirements_report_after_preferences() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+
+        let menu = primary_menu_button(window.upcast_ref())
+            .and_then(|button| button.menu_model())
+            .expect("window has the primary menu");
+        let section = menu
+            .item_link(0, gio::MENU_LINK_SECTION)
+            .expect("menu has a section");
+        let actions = (0..section.n_items())
+            .filter_map(|index| {
+                section
+                    .item_attribute_value(index, gio::MENU_ATTRIBUTE_ACTION, None)
+                    .and_then(|value| value.get::<String>())
+            })
+            .collect::<Vec<_>>();
+
+        let preferences = actions
+            .iter()
+            .position(|action| action == "app.show-preferences")
+            .unwrap();
+        assert_eq!(
+            actions.get(preferences + 1).map(String::as_str),
+            Some("app.show-requirements-report")
+        );
+        let label = section
+            .item_attribute_value(
+                i32::try_from(preferences + 1).unwrap(),
+                gio::MENU_ATTRIBUTE_LABEL,
+                None,
+            )
+            .and_then(|value| value.get::<String>());
+        assert_eq!(label.as_deref(), Some("_Requirements Report"));
+    }
+
+    #[gtk::test]
+    fn recording_error_dialog_offers_the_report() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+        let dialog = window.recording_error_dialog(&anyhow::anyhow!("Failed to record"));
+
+        assert!(dialog.has_response("report"));
+        assert_eq!(dialog.response_label("report"), "Open Requirements Report");
+        assert!(dialog.has_response("ok"));
+        assert_eq!(dialog.default_response().as_deref(), Some("ok"));
     }
 }

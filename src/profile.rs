@@ -124,6 +124,24 @@ impl Profile {
         self.data().is_experimental
     }
 
+    /// The factory names of the elements of the encoder and muxer bins: the
+    /// first token of each `!`-separated part, without caps or properties.
+    pub fn required_elements(&self) -> Vec<String> {
+        let data = self.data();
+
+        [
+            Some(&data.videoenc_bin_str),
+            data.audioenc_bin_str.as_ref(),
+            data.muxer_bin_str.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|description| description.split('!'))
+        .filter_map(|part| part.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+    }
+
     pub fn is_available(&self) -> bool {
         self.is_available_inner()
             .inspect_err(|err| {
@@ -271,6 +289,36 @@ mod tests {
                 profile.id()
             );
         }
+    }
+
+    #[test]
+    fn required_elements_of_webm_vp8() {
+        init_resources();
+
+        let elements = Profile::from_id("webm-vp8").unwrap().required_elements();
+        assert_eq!(
+            elements,
+            [
+                "videoconvert",
+                "vp8enc",
+                "queue",
+                "audioconvert",
+                "opusenc",
+                "queue",
+                "webmmux"
+            ]
+        );
+    }
+
+    #[test]
+    fn required_elements_strip_caps() {
+        init_resources();
+
+        let elements = Profile::from_id("mp4").unwrap().required_elements();
+        assert!(elements.contains(&"capsfilter".to_string()));
+        assert!(elements.contains(&"x264enc".to_string()));
+        assert!(elements.contains(&"mp4mux".to_string()));
+        assert!(elements.iter().all(|e| !e.contains('=')));
     }
 
     #[test]

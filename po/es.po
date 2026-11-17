@@ -142,7 +142,7 @@ msgstr "Demora (segundos)"
 msgid "Time interval before recording begins"
 msgstr "Intervalo de tiempo antes de que comience la grabación"
 
-#: data/resources/ui/preferences_dialog.ui:27
+#: data/resources/ui/preferences_dialog.ui:27 src/doctor/checks.rs
 msgid "Recordings Folder"
 msgstr "Carpeta de grabaciones"
 
@@ -480,7 +480,7 @@ msgstr "Este formato es experimental y no está respaldado."
 msgid "None"
 msgstr "Ninguno"
 
-#: src/preferences_dialog.rs:681
+#: src/preferences_dialog.rs:681 src/doctor/checks.rs
 msgid "Kooha was built without gtk4-layer-shell."
 msgstr "Kooha se compiló sin gtk4-layer-shell."
 
@@ -594,11 +594,11 @@ msgstr "¿Quiere salir de la aplicación?"
 msgid "Quit"
 msgstr "Salir"
 
-#: src/window/mod.rs:256
+#: src/window/mod.rs:256 src/doctor/dialog.rs
 msgid "Copy to clipboard"
 msgstr "Copiar en el portapapeles"
 
-#: src/window/mod.rs:261
+#: src/window/mod.rs:261 src/doctor/dialog.rs
 msgid "Copied to clipboard"
 msgstr "Se copió en el portapapeles"
 
@@ -657,6 +657,209 @@ msgstr "Selección"
 #: src/window/mod.rs:760
 msgid "Camera overlay unavailable"
 msgstr "La cámara en pantalla no está disponible"
+
+#: data/resources/ui/window.ui
+msgid "_Requirements Report"
+msgstr "_Reporte de requisitos"
+
+#: src/window/mod.rs
+msgid "Open Requirements Report"
+msgstr "Abrir el reporte de requisitos"
+
+#: src/main.rs
+msgid "Print the requirements report and exit"
+msgstr "Imprime el reporte de requisitos y sale"
+
+#: src/doctor/dialog.rs
+msgid "Requirements Report"
+msgstr "Reporte de requisitos"
+
+#: src/doctor/dialog.rs
+msgid "Copy Report"
+msgstr "Copiar reporte"
+
+#: src/doctor/mod.rs src/doctor/dialog.rs
+msgid "Problem"
+msgstr "Problema"
+
+#: src/doctor/mod.rs src/doctor/dialog.rs
+msgid "What stops working"
+msgstr "Qué deja de funcionar"
+
+#: src/doctor/mod.rs src/doctor/dialog.rs
+msgid "How to fix it"
+msgstr "Cómo arreglarlo"
+
+#: src/doctor/checks.rs
+msgid "GStreamer Elements"
+msgstr "Elementos de GStreamer"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "Missing GStreamer elements: {elements}."
+msgstr "Faltan elementos de GStreamer: {elements}."
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "Unknown package for {element}."
+msgstr "Se desconoce el paquete de {element}."
+
+#: src/doctor/checks.rs
+msgid "Recording does not work."
+msgstr "No se puede grabar."
+
+#: src/doctor/checks.rs
+msgid "The camera overlay may not be able to show the camera."
+msgstr "Puede que no se pueda mostrar la cámara en pantalla."
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "These formats cannot be used: {formats}."
+msgstr "No se pueden usar estos formatos: {formats}."
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "Reinstall Kooha: it includes {elements}."
+msgstr "Reinstale Kooha: incluye {elements}."
+
+#: src/doctor/checks.rs
+msgid "Screen Capture Portal"
+msgstr "Portal de captura de pantalla"
+
+#. Translators: No pointer modes are available.
+#: src/doctor/checks.rs
+msgid "none"
+msgstr "ninguno"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "Version {version} · pointer: {modes}"
+msgstr "Versión {version} · puntero: {modes}"
+
+#: src/doctor/checks.rs
+msgid "The screen capture portal does not respond."
+msgstr "El portal de captura de pantalla no responde."
+
+#: src/doctor/checks.rs
+msgid "Nothing can be recorded."
+msgstr "No se puede grabar nada."
+
+#: src/doctor/checks.rs
+msgid "PipeWire"
+msgstr "PipeWire"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "Version {version}"
+msgstr "Versión {version}"
+
+#: src/doctor/checks.rs
+msgid "PipeWire is not running."
+msgstr "PipeWire no está en ejecución."
+
+#: src/doctor/checks.rs
+msgid "Audio Devices"
+msgstr "Dispositivos de audio"
+
+#: src/doctor/checks.rs
+msgid "There is no default output device."
+msgstr "No hay un dispositivo de salida predeterminado."
+
+#: src/doctor/checks.rs
+msgid "Desktop audio cannot be recorded."
+msgstr "No se puede grabar el audio del escritorio."
+
+#: src/doctor/checks.rs
+msgid "There is no default microphone."
+msgstr "No hay un micrófono predeterminado."
+
+#: src/doctor/checks.rs
+msgid "The microphone cannot be recorded."
+msgstr "No se puede grabar el micrófono."
+
+#: src/doctor/checks.rs
+msgid "Connect the device and choose it as the default in the sound settings."
+msgstr ""
+"Conecte el dispositivo y elíjalo como predeterminado en la configuración de "
+"sonido."
+
+#: src/doctor/checks.rs
+msgid "Cameras"
+msgstr "Cámaras"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/doctor/checks.rs
+msgid "{count} camera"
+msgid_plural "{count} cameras"
+msgstr[0] "{count} cámara"
+msgstr[1] "{count} cámaras"
+
+#: src/doctor/checks.rs
+msgid "No camera was found."
+msgstr "No se encontró ninguna cámara."
+
+#: src/doctor/checks.rs
+msgid "The camera overlay cannot be shown."
+msgstr "No se puede mostrar la cámara en pantalla."
+
+#: src/doctor/checks.rs
+msgid "Screen Overlays"
+msgstr "Capas en pantalla"
+
+#: src/doctor/checks.rs
+msgid "The camera overlay and the area border cannot be shown."
+msgstr "No se pueden mostrar la cámara en pantalla ni el borde del área."
+
+#: src/doctor/checks.rs
+msgid "Then rebuild Kooha."
+msgstr "Después vuelva a compilar Kooha."
+
+#: src/doctor/checks.rs
+msgid "Your desktop does not support screen overlays (wlr-layer-shell)."
+msgstr "Su escritorio no admite capas en pantalla (wlr-layer-shell)."
+
+#: src/doctor/checks.rs
+msgid "Could not ask the desktop without a display."
+msgstr "No se pudo consultar al escritorio sin una pantalla."
+
+#: src/doctor/checks.rs
+msgid "Tray Icon"
+msgstr "Ícono de bandeja"
+
+#: src/doctor/checks.rs
+msgid "Then enable the AppIndicator extension and log in again."
+msgstr "Después active la extensión AppIndicator y vuelva a iniciar sesión."
+
+#: src/doctor/checks.rs
+msgid "Add a system tray to your desktop panel."
+msgstr "Agregue una bandeja del sistema al panel del escritorio."
+
+#: src/doctor/checks.rs
+msgid "No system tray is available (org.kde.StatusNotifierWatcher)."
+msgstr "No hay una bandeja del sistema disponible (org.kde.StatusNotifierWatcher)."
+
+#: src/doctor/checks.rs
+msgid "The tray icon is not shown."
+msgstr "No se muestra el ícono de bandeja."
+
+#: src/doctor/checks.rs
+msgid "The recordings folder does not exist."
+msgstr "La carpeta de grabaciones no existe."
+
+#: src/doctor/checks.rs
+msgid "Recordings cannot be saved."
+msgstr "No se pueden guardar las grabaciones."
+
+#: src/doctor/checks.rs
+msgid "The recordings folder is not writable."
+msgstr "No se puede escribir en la carpeta de grabaciones."
+
+#: src/doctor/checks.rs
+msgid ""
+"Check the owner and the permissions of the folder, or choose another one in "
+"Preferences."
+msgstr ""
+"Revise el dueño y los permisos de la carpeta, o elija otra en Preferencias."
 
 #~ msgid "Donate (Buy Me a Coffee)"
 #~ msgstr "Donar (cómprame un café)"
