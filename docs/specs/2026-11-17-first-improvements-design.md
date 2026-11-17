@@ -149,8 +149,8 @@ Criterios:
 ## 5 · Borde del área
 
 - Se ve en la cuenta regresiva, grabando y en pausa (P14), sólo con `CaptureMode::Selection`.
-- Línea opaca de 2 px lógicos: segmentos blancos de 6 px sobre gris claro `#c8c8c8`, sin
-  transparencia (P15).
+- Línea opaca de 1 px lógico: guiones blancos de 4 px sobre gris claro `#c8c8c8`, sin
+  transparencia (P15, y «más sutil que en el mock», `docs/specs/mock-feedback.md`).
 - El borde interior queda a 2 px lógicos por fuera del rectángulo que recorta `videocrop`,
   calculado con el mismo redondeo que `make_videocrop`. Si el área toca un borde del monitor,
   ese lado no se dibuja.

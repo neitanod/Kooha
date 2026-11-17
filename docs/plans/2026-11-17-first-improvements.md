@@ -939,9 +939,9 @@ Commit: `feat: draw a dashed border outside the recorded area`.
 **Archivos:** crear `src/area_border/mod.rs`, `src/area_border/geometry.rs`.
 
 ```rust
-pub const LINE_WIDTH: f64 = 2.0;  // logical px
+pub const LINE_WIDTH: f64 = 1.0;  // logical px (mock-feedback.md)
 pub const GAP: f64 = 2.0;         // logical px between the crop and the line
-pub const DASH: f64 = 6.0;
+pub const DASH: f64 = 4.0;
 pub const GRAY: (f64, f64, f64) = (0xc8 as f64 / 255.0, 0xc8 as f64 / 255.0, 0xc8 as f64 / 255.0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
