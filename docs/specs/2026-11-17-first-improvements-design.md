@@ -129,11 +129,13 @@ Criterios:
   lógicos de alto, en pasos del 10 %. Se guarda.
 - **Forma** (P9): círculo o rectángulo con esquinas redondeadas; el **botón derecho** las
   alterna. Se guarda.
-- **Espejado** (P13): espejado en `Init` y `Finished`; sin espejar desde que arranca la
-  cuenta regresiva o, sin demora, antes de poner el pipeline en `PLAYING`, y hasta que la
-  grabación termina.
+- **Espejado** (P13): espejado mientras no hay grabación y mientras se espera el portal y el
+  selector de área; sin espejar desde que arranca la cuenta regresiva o, sin demora, antes de
+  poner el pipeline en `PLAYING`, y hasta que la grabación termina.
 - **Monitor**: el PiP aparece en el monitor donde estaba la última vez; la primera vez, en el
-  monitor primario, abajo a la derecha.
+  monitor donde está la ventana de Kooha, abajo a la derecha. Una capa no se puede arrastrar de
+  un monitor a otro, así que Preferencias tiene la fila «Camera Monitor» para pasarlo a otro
+  (decisión del orquestador en la ronda 2 del plan, avisada en el Hilo, Mensaje 15370).
 - Sin capas disponibles, los controles del PiP se ven deshabilitados y Preferencias muestra el
   aviso (P18).
 - Si la fuente elegida desaparece, el PiP se apaga y se notifica.
@@ -199,7 +201,7 @@ Criterios:
 Se agregan dos grupos a `preferences_dialog.ui`:
 
 - **Recording**: «Flash on Resume».
-- **Camera & Overlays**: «Show Camera», «Camera Source», «Camera Shape». Si no hay capas
+- **Camera & Overlays**: «Show Camera», «Camera Source», «Camera Shape», «Camera Monitor». Si no hay capas
   disponibles, el grupo muestra arriba el aviso «Overlays unavailable» con el motivo y un botón
   que abre el reporte de requisitos, y sus filas quedan deshabilitadas.
 

@@ -59,11 +59,26 @@ Meson.
 
 ```bash
 export CARGO_HOME=$PWD/_build/cargo-home
+export KOOHA_TEST_RESOURCES=$PWD/_build/data/resources/resources.gresource
+ninja -C _build                                            # build completo; genera los recursos
 cargo test --target-dir _build/src                         # suite
-cargo clippy --target-dir _build/src -- -D warnings        # linter
+cargo test --target-dir _build/src --features layer-shell  # suite con capas (desde el chunk 4)
+cargo clippy --target-dir _build/src -- -D warnings        # linter (y con --features layer-shell)
 cargo fmt --check                                          # formato
-ninja -C _build                                            # build completo con Meson
 ```
+
+`ninja` va **antes** de `cargo test`: los tests de perfiles cargan el `resources.gresource`
+generado (codex r2 #1, fable r2 #2). `KOOHA_TEST_RESOURCES` le dice a los tests dónde está; sin
+la variable, cargan `config::RESOURCES_FILE` como hoy. Para que `meson test` también la tenga,
+agregarla al `env` de los dos `test()` de `src/meson.build`
+(`'KOOHA_TEST_RESOURCES=' + meson.project_build_root() / 'data' / 'resources' / 'resources.gresource'`).
+
+**Tests de GTK:** todo test que toca GTK usa `#[gtk::test]`, que corre esos tests en un único
+hilo (gtk4-macros 0.11.0, `src/lib.rs` líneas 416–428; el repo ya lo usa en `src/timer.rs`,
+línea 200). Llamar `gtk::init()` a mano desde tests comunes entra en pánico desde el segundo
+hilo (gtk4 0.11.2, `src/rt.rs` línea 132; codex r2 #2, fable r2 #4). La sesión de los agentes
+tiene `WAYLAND_DISPLAY`, así que corren de verdad; ningún test llama `present()` sobre una
+ventana, para no dibujar en la pantalla de Sebastián.
 
 Estado de partida (`d5e68e3`): 42 tests pasan; `settings::tests::default_profile` aborta porque
 busca el schema en `data/`, donde sólo está el `.gschema.xml.in`. Lo arregla la tarea 1.1.
@@ -94,6 +109,12 @@ glib-compile-schemas "$WT/_install/share/glib-2.0/schemas"
 export GSETTINGS_SCHEMA_DIR="$WT/_install/share/glib-2.0/schemas"
 export GSETTINGS_BACKEND=keyfile
 export XDG_CONFIG_HOME=/home/sebas/robotin/apps/kooha/.workspace/t-1088-first-improvements/dev-config
+# The isolated XDG_CONFIG_HOME hides ~/.config/user-dirs.dirs, so pin the
+# recordings folder inside the workspace instead of letting Kooha fall back
+# to the real home (fable r2 #7).
+REC=/home/sebas/robotin/apps/kooha/.workspace/t-1088-first-improvements/dev-recordings
+mkdir -p "$REC"
+gsettings set io.github.seadve.Kooha.Devel saving-location "b'$REC'"
 exec "$WT/_install/bin/kooha" "$@"
 ```
 
@@ -110,9 +131,9 @@ el grafo es una cadena: una tanda por chunk, un chunk por tanda.
 
 | Chunk | Mejora | Depende de | Tanda | Archivos nuevos | Archivos que modifica |
 |---|---|---|---|---|---|
-| 1 | Avisos de captura | — | 1 | `src/capture_warnings.rs` | `src/settings.rs` (test), `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `src/application.rs`, `src/main.rs`, `po/POTFILES.in`, `po/es.po` |
+| 1 | Avisos de captura | — | 1 | `src/capture_warnings.rs` | `src/settings.rs` (test), `src/profile.rs` (test), `src/meson.build`, `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `data/resources/style.css`, `src/application.rs`, `src/main.rs`, `po/POTFILES.in`, `po/es.po` |
 | 2 | Ícono de bandeja | 1 | 2 | `src/tray/mod.rs`, `src/tray/model.rs`, `src/tray/service.rs` | `Cargo.toml`, `Cargo.lock`, `src/application.rs`, `src/window/mod.rs`, `src/main.rs`, `po/*` |
-| 3 | Pausa | 2 | 3 | `src/pause_gate.rs` | `src/pipeline.rs`, `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `src/application.rs`, schema, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/tray/*`, `po/*` |
+| 3 | Pausa | 2 | 3 | `src/pause_gate.rs` | `Cargo.toml`, `Cargo.lock` (`gstreamer-pbutils` de desarrollo), `src/pipeline.rs`, `src/recording.rs`, `src/window/mod.rs`, `data/resources/ui/window.ui`, `data/resources/ui/shortcuts.ui`, `src/application.rs`, schema, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/tray/*`, `po/*` |
 | 4 | PiP de cámara | 3 | 4 | `src/overlay.rs`, `src/camera_pip/{mod,geometry,devices,view}.rs` | `Cargo.toml`, `meson.build`, `meson_options.txt`, `src/meson.build`, schema, `src/application.rs`, `src/window/mod.rs`, `window.ui`, `preferences_dialog.*`, `src/tray/*`, `po/*` |
 | 5 | Borde del área | 4 | 5 | `src/area_border/{mod,geometry,view}.rs` | `src/pipeline.rs`, `src/recording.rs`, `src/application.rs`, `po/*` |
 | 6 | Reporte de requisitos | 5 | 6 | `src/doctor/{mod,checks,dialog}.rs` | `src/main.rs`, `src/application.rs`, `src/window/mod.rs`, `window.ui`, `preferences_dialog.rs`, `po/*` |
@@ -148,8 +169,9 @@ El test compila `data/` con `glib-compile-schemas`, pero ahí está
 `config::APP_ID` no existe y el test aborta. Lo mismo va a afectar a todo test nuevo que use
 `Settings`.
 
-- [ ] **Paso 1:** correr `cargo test --target-dir _build/src settings::tests::default_profile`.
-  Esperado: aborta con `Settings schema 'io.github.seadve.Kooha.Devel' is not installed`.
+- [ ] **Paso 1:** correr `cargo test --target-dir _build/src settings::tests::default_profile`
+  (con las variables de «Comandos de verificación»). Esperado: aborta con
+  `Settings schema 'io.github.seadve.Kooha.Devel' is not installed`.
 - [ ] **Paso 2:** reescribir `setup_schema` para que genere el schema en un directorio temporal:
 
 ```rust
@@ -186,7 +208,16 @@ fn setup_schema() {
 
   Hacer `setup_schema` `pub(crate)` y moverla a `#[cfg(test)] pub(crate) mod test_utils` en
   `src/settings.rs`, para que la usen los tests de los otros módulos.
-- [ ] **Paso 3:** `cargo test --target-dir _build/src`. Esperado: 43 tests pasan.
+- [ ] **Paso 2b:** mover `init_gresources` de `src/profile.rs` (tests) a `test_utils` como
+  `init_resources()`, cargando `std::env::var("KOOHA_TEST_RESOURCES")` o, si no está,
+  `config::RESOURCES_FILE`. `Profile::all()` lee `profiles.yml` de los recursos registrados
+  (`src/profile.rs` línea 73), así que **todo test que use un perfil llama a `setup_schema()` y
+  a `init_resources()`**, empezando por `default_profile`, que hoy pasa sólo si otro test de
+  `profile.rs` corrió antes en el mismo proceso. Agregar también
+  `test_utils::temp_saving_location(&Settings) -> PathBuf`: crea un directorio temporal y lo
+  fija en `saving-location`, para que ningún test cree `~/Videos/Kooha` (fable r2 #7).
+- [ ] **Paso 3:** `cargo test --target-dir _build/src`. Esperado: 43 tests pasan, también
+  corriendo `default_profile` solo con filtro.
 
 ### Tarea 1.2 · Cálculo de los avisos
 
@@ -350,8 +381,7 @@ impl CaptureConfig {
   cronómetro, agregar `GtkFlowBox id="recording_warnings_box"` (`selection-mode` none,
   `halign` center, `max-children-per-line` 2, `visible` false). Lo mismo en `delay_page`,
   debajo de `delay_label`: `GtkFlowBox id="delay_warnings_box"`.
-- [ ] **Paso 2: test que falla** (con `gtk::init()`; si falla por falta de display, el test
-  hace `return` y lo dice con `eprintln!`; en la etapa 7 se corre con display):
+- [ ] **Paso 2: test que falla**, con `#[gtk::test]`:
   `warning_chips(&CaptureWarnings::compute(true, true, false, false))` devuelve dos
   `gtk::Label` con los textos «⚠ Without microphone» y «⚠ Without mouse pointer» y la clase
   `capture-warning`; con avisos vacíos devuelve cero.
@@ -496,8 +526,10 @@ pub fn tooltip(model: &TrayModel) -> (String, String); // (title, body)
     `win.toggle-record` en `Delayed` y `Flushing`).
   - `audio_checks_disabled_without_audio_support`: con `audio_supported: false` las dos `Check`
     de audio quedan deshabilitadas aun en `Idle` (igual que `update_audio_actions` de la ventana).
-  - `icon_follows_state`: `Idle` → `crate::config::APP_ID` (el ícono de la app, que en
-    desarrollo es el `.Devel`), `Recording` →
+  - `icon_follows_state`: `Idle` y `Starting` → `crate::config::APP_ID` (el ícono de la app, que en
+    desarrollo es el `.Devel`; `KoohaTray::icon_theme_path` devuelve `config::PKGDATADIR/../icons`
+    para que Plasma lo encuentre aunque esté en `_install`), `Flushing` →
+    `"document-save-symbolic"`, `Recording` →
     `"media-record-symbolic"`, `Paused` → `"media-playback-pause-symbolic"`.
   - `tooltip_lists_warnings`: el cuerpo del tooltip contiene cada aviso.
 - [ ] **Paso 2:** fallan por no compilar.
@@ -574,20 +606,36 @@ impl ksni::Tray for KoohaTray {
   (`window.recording_snapshot().is_none()`): el menú ya los deshabilita, y este chequeo cubre un
   click que llegó tarde. De todos modos la grabación ya no lee esas claves después de su foto
   (tarea 1.3).
-- [ ] **Paso 2:** `Application::update_tray(&self)`: arma el `TrayModel` con
-  `self.window()` (estado y duración de la grabación actual, avisos) y `self.settings()`, y
-  llama `tray.update`. Para eso, en `Window`, agregar
+- [ ] **Paso 2:** `Application::update_tray(&self, snapshot: Option<(RecordingState, gst::ClockTime, CaptureWarnings)>)`:
+  arma el `TrayModel` con el `snapshot` que recibe y con `self.settings()`, y llama
+  `tray.update`. **Nunca llama a `Application::window()`** (fable r2 #1): `update_view` corre
+  dentro de `Window::constructed`, cuando la ventana todavía no está en la lista de la
+  aplicación, y `window()` crearía otra ventana, en un bucle sin fin. Los `connect_*_changed`
+  de la aplicación guardan el último `snapshot` recibido en un `RefCell` de
+  `imp::Application` y lo reusan. En `Window`, agregar
   `pub fn recording_snapshot(&self) -> Option<(RecordingState, gst::ClockTime, CaptureWarnings)>`:
   `Some` mientras exista la grabación, también en `Init`. La función pura
   `tray_state(Option<RecordingState>) -> TrayRecordingState` (en `model.rs`, con test) mapea
   `None` y `Finished` → `Idle`, `Init` y `Delayed` → `Starting`, y el resto 1:1.
-- [ ] **Paso 3:** llamar `update_tray` desde: `Window::update_view` (cambios de estado),
+- [ ] **Paso 3:** llamar `update_tray(self.recording_snapshot())` desde: `toggle_record`,
+  **inmediatamente después** de `imp.recording.replace(...)` y antes del primer `await`, para
+  que la bandeja muestre `Starting` mientras espera el portal (codex r2 #6); `Window::update_view` (cambios de estado),
   el handler de `connect_duration_notify` (sólo si cambia el segundo entero, para no
   actualizar D-Bus cinco veces por segundo), `handle_recording_finished`, y los
   `connect_*_changed` de `record-desktop-audio`, `record-microphone`, `show-pointer` y
   `profile-id` en `Application::startup`.
-- [ ] **Paso 4:** la prueba de punta a punta del menú se hace en la etapa 8, con el ejecutor
+- [ ] **Paso 4: test** `#[gtk::test] app_and_window_construct`: construye `Application` y
+  `Window::new(&app)` sin presentarla y termina; detecta el bucle de `constructed` → `window()`.
+  Otro test `#[gtk::test] tray_shows_starting_while_portal_pending`: con un
+  `recording_snapshot` en `Init`, el `TrayModel` que arma `update_tray` tiene estado
+  `Starting` y las tres casillas de captura deshabilitadas (se prueba la función que arma el
+  modelo, `tray_model(snapshot, &settings) -> TrayModel`, extraída de `update_tray`).
+- [ ] **Paso 5:** la prueba de punta a punta del menú se hace en la etapa 8, con el ejecutor
   de desarrollo.
+- [ ] **Paso 6:** `Application::window()` y `quit_request` hacen
+  `active_window().downcast::<Window>().unwrap()` (`src/application.rs` líneas 111 y 174). Las
+  ventanas-capa de los chunks 4 y 5 se crean **sin** la propiedad `application`, así nunca son
+  la ventana activa de la app; el plan de esos chunks lo repite.
 
 ### Tarea 2.5 · Traducciones, verificación y commit
 
@@ -673,10 +721,18 @@ impl PauseGate {
 }
 ```
 
-El probe: `pad.add_probe(gst::PadProbeType::BUFFER, …)`. Con `info.buffer_mut()` y
-`make_mut()`, si el PTS mapea a `Drop` devuelve `gst::PadProbeReturn::Drop`; si mapea a
-`Keep(t)`, pone el PTS en `t` y corre el DTS (si tiene) en la misma cantidad. Un buffer sin PTS
-pasa sin cambios.
+El probe (fable r2 #9):
+- tipo `gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST`; una lista se recorre
+  buffer por buffer con la misma regla, sacando los que caen en una pausa;
+- la compuerta compara en **tiempo de ejecución**: convierte el PTS con el segmento del pad
+  (guardado de un probe `EVENT_DOWNSTREAM` sobre `Segment`, con `segment.to_running_time(pts)`),
+  aplica `PauseTimeline::map`, y vuelve a posición con `segment.position_from_running_time`.
+  Así vale aunque el segmento no arranque en 0;
+- si mapea a `Drop` devuelve `gst::PadProbeReturn::Drop`; si mapea a `Keep(t)`, pone el PTS
+  convertido y corre el DTS (si tiene) en la misma cantidad. Un buffer sin PTS pasa sin cambios.
+
+Los tests leen los PTS con un probe sobre el pad `sink` de un `fakesink sync=false`, que guarda
+cada PTS en un `Arc<Mutex<Vec<_>>>`: sin `gstreamer-app` (que no está en `Cargo.toml`).
 
 **Dónde va** (en `PipelineBuilder::build`, `src/pipeline.rs`): un elemento `identity` llamado
 `kooha-video-gate` entre la salida de video (`videocrop` o `videosrc_bin`) y
@@ -685,21 +741,25 @@ pasa sin cambios.
 recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y lo engancha.
 
 - [ ] **Paso 1: test de integración que falla**, en `src/pause_gate.rs`, con un pipeline real:
-  `videotestsrc is-live=true ! video/x-raw,framerate=30/1 ! identity name=gate ! appsink name=sink sync=false`.
-  El test (sin GTK, con `gst::init()`) arranca el pipeline, espera 300 ms, `gate.pause(rt)`,
-  espera 300 ms, `gate.resume(rt)`, espera 300 ms, manda EOS y junta los PTS del `appsink`.
-  Afirma:
+  `videotestsrc is-live=true ! video/x-raw,framerate=30/1 ! identity name=gate ! fakesink name=sink sync=false`.
+  El test (sin GTK, con `gst::init()`) arranca el pipeline, espera 300 ms, `gate.pause(rt_pause)`,
+  espera 300 ms, `gate.resume(rt_resume)`, espera 300 ms, toma `rt_final`, manda EOS y junta
+  los PTS. Afirma:
   - los PTS son crecientes;
   - ningún salto entre PTS consecutivos supera dos cuadros (66 ms) — criterio C2;
-  - el último PTS es menor que 700 ms (sin la pausa, sería mayor que 850 ms).
-  El tiempo de pared del test se mide y **no** se afirma: sólo se afirman los PTS.
+  - el último PTS es ≤ `rt_final − (rt_resume − rt_pause)` + un cuadro, con los tiempos de
+    ejecución que tomó el propio test (fable r2 #9a): no depende de cuánto duraron los `sleep`.
+- [ ] **Paso 1b:** test `segment_not_starting_at_zero`: con un segmento de `start` 10 s
+  (empujado con un `identity` y un evento `Segment` propio, o probando la conversión pura con
+  un `gst::FormattedSegment` armado a mano), la compuerta descarta y corre igual que con
+  `start` 0.
 - [ ] **Paso 2:** lo mismo con `audiotestsrc is-live=true` (criterio C2 para el audio).
 - [ ] **Paso 2b: video y audio saltan juntos** (codex r1 #14): un solo pipeline con las dos
-  ramas, `videotestsrc` y `audiotestsrc` en vivo, cada una con su `identity` y su `appsink`,
+  ramas, `videotestsrc` y `audiotestsrc` en vivo, cada una con su `identity` y su `fakesink` con probe,
   y **una** compuerta enganchada a los dos pads. Después de pausar 300 ms y reanudar, el primer
   PTS de video posterior a la reanudación y el primero de audio difieren en menos de 50 ms, y
   el último PTS de cada rama difiere del otro en menos de 50 ms.
-- [ ] **Paso 2c: EOS estando en pausa**: pausar, mandar EOS sin reanudar; los dos `appsink`
+- [ ] **Paso 2c: EOS estando en pausa**: pausar, mandar EOS sin reanudar; los dos `fakesink`
   reciben EOS en menos de 2 s (el test lo mide y lo afirma), y no llegó ningún buffer con PTS
   dentro de la pausa.
 - [ ] **Paso 3–4:** falla, implementar, pasa.
@@ -712,7 +772,8 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
 - [ ] **Paso 1:** clave `<key type="b" name="pause-flash"><default>false</default></key>`.
   `gsettings-macro` genera `pause_flash()`, `set_pause_flash()` y `bind_pause_flash()`.
 - [ ] **Paso 2: test que falla:** pipeline real
-  `videotestsrc is-live=true pattern=black ! video/x-raw,format=BGRx,framerate=30/1 ! identity name=gate ! videobalance name=flash ! appsink`;
+  `videotestsrc is-live=true pattern=black ! video/x-raw,format=BGRx,framerate=30/1 ! identity name=gate ! videobalance name=flash ! fakesink`
+  (los píxeles se leen en el probe del pad `sink` del `fakesink`);
   con el flash habilitado, pausar y reanudar; los buffers con PTS de salida en
   `[resume_out, resume_out + 150ms)` tienen el primer píxel en blanco
   (`>= 0xF0` en B, G y R), y el primer buffer posterior a esa ventana vuelve a negro — C3.
@@ -765,7 +826,8 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
 
 - [ ] En `window.ui`, `pause_record_button`: sacar `<property name="visible">False</property>`.
 - [ ] En `application.rs`, descomentar `set_accels_for_action("win.toggle-pause", &["<Control>k"])`
-  y borrar el comentario del issue 112. Agregar el atajo a `data/resources/ui/shortcuts.ui`.
+  y borrar el comentario del issue 112. `data/resources/ui/shortcuts.ui` ya trae la entrada de
+  `win.toggle-pause` (línea 51): comprobar que se ve en la ventana de atajos.
 - [ ] En Preferencias, grupo nuevo «Recording» después de «General», con `AdwSwitchRow`
   `pause_flash_row` («Flash on Resume», subtítulo «Mark each resume with a short white
   flash»), ligado con `bind_pause_flash(&row, "active")`.
@@ -782,7 +844,10 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
   graba 3 s, pausa 2 s, graba 3 s, EOS, y mide la duración del archivo con
   `gst_pbutils::Discoverer` (agregar `gstreamer-pbutils` sólo como `dev-dependency`). Afirma
   6 s ± 0,3 s.
-- [ ] Correrlo y pegar la salida en el commit (cuerpo del mensaje) o en el informe del chunk.
+- [ ] Correrlo también con los perfiles `mp4` y `matroska-h264` si `x264enc` está instalado,
+  con una pausa de 4 s, más larga que la latencia de 2 s del `audiomixer`
+  (`src/pipeline.rs` línea 393), porque `mp4mux` en vivo trabaja con plazos de reloj (fable r2 #9).
+- [ ] Pegar la salida en el informe del chunk.
 
 ### Tarea 3.7 · Traducciones, verificación y commit
 
@@ -918,7 +983,10 @@ pub fn create_element(id: &str) -> anyhow::Result<gst::Element>;
 ```
 
 `list()` usa `gst::DeviceMonitor` con el filtro `Video/Source`, `start()`, `devices()`,
-`stop()` — mismo patrón que `src/device.rs`.
+`stop()` — mismo patrón que `src/device.rs`. La misma webcam puede aparecer dos veces, por
+PipeWire y por V4L2 (fable r2 #10; no verificado): `list()` pasa el resultado por la función
+pura `dedupe(Vec<(CameraSource, Option<String> /* device path */)>) -> Vec<CameraSource>`, que
+se queda con la primera de cada ruta, con test.
 
 - [ ] **Tests primero** de `choose` (id configurado presente, ausente → primera, lista vacía →
   `None`). `list()` y `create_element` se prueban en la etapa 8 con la webcam real
@@ -939,7 +1007,7 @@ alrededor.
   (línea 374): al fijar el paintable, conectar `invalidate-contents` → `queue_draw` e
   `invalidate-size` → `queue_resize`, guardar los `SignalHandlerId` y desconectarlos al
   reemplazar el paintable o en `dispose`.
-- [ ] Tests (con `gtk::init()`; si no hay display, `return` temprano y loguear): `measure`
+- [ ] Tests con `#[gtk::test]`: `measure`
   devuelve `(200, 200)` con círculo y alto 200, y `(356, 200)` con rectángulo;
   `replacing_paintable_disconnects`: con dos paintables de prueba, después de reemplazar el
   primero por el segundo, invalidar el primero no llega al widget y el segundo sí (contar con
@@ -951,15 +1019,28 @@ alrededor.
 
 **Archivos:** `src/camera_pip/mod.rs`.
 
-`CameraPip` (objeto GLib) que dueño de: la ventana-capa, el `PipView`, y un pipeline
-`<fuente> ! videoconvert ! videoflip name=mirror ! gtk4paintablesink`.
+`CameraPip` (objeto GLib) dueño de: la ventana-capa, el `PipView`, y un pipeline
+`<fuente> ! videoconvert ! gtk4paintablesink`.
+
+La ventana-capa se crea **sin** la propiedad `application` (nunca es la ventana activa de la
+app, que `Application::window()` baja a `Window` con `unwrap`), sin decoración, con la clase
+CSS `camera-pip` y `window.camera-pip { background: none; }` en `style.css`. Su región de
+entrada sigue la forma del PiP: `relayout()` llama
+`surface.set_input_region(Some(&region))` con una región armada por la función pura
+`shape_input_rects(shape, w, h) -> Vec<(i32, i32, i32, i32)>`, que aproxima el círculo o las
+esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para un círculo de
+200, el punto `(100, 100)` está dentro de algún rectángulo y `(2, 2)` no.
 
 - **Prender** (`camera-enabled` pasa a `true`, o al arrancar la app con la clave en `true`):
   si `overlay::availability()` es `Err`, no hace nada. Si no hay fuentes, pone
   `camera-enabled` en `false` y manda la notificación «No camera found». Si hay: arma el
   pipeline con `devices::choose(list(), settings.camera_device())`, lo pone en `PLAYING`, crea
-  la ventana con `overlay::init_overlay` en el monitor guardado (`camera-monitor`, buscado por
-  `gdk::Monitor::connector()`; si no está, el primero de `display.monitors()`), posición
+  la ventana con `overlay::init_overlay` en el monitor que resuelve
+  `resolve_monitor(saved_connector, kooha_window_monitor, monitors)` — función pura con test:
+  el de `camera-monitor` si está conectado; si no, el monitor donde está la ventana de Kooha
+  (`display.monitor_at_surface`, que la ventana le pasa con
+  `CameraPip::set_kooha_monitor(Option<gdk::Monitor>)` al mapearse); si no, el primero de la
+  lista —, posición
   `camera-position` (si es `(-1,-1)`, `default_position`), `clamp_position`, y `present()`.
 - **Apagar**: pipeline a `NULL`, `window.destroy()`.
 - **Mover**: `GestureDrag` con botón 1. En cada `drag-update`, como la superficie se mueve con el
@@ -976,19 +1057,32 @@ alrededor.
   `overlay::set_margins`, `queue_resize` del `PipView`. Se llama al prender, después de cada
   cambio de tamaño, forma o monitor, y cuando cambia la geometría del monitor
   (`connect_geometry_notify`). Si la posición cambió, se guarda.
-- **Espejo** (P13; codex r1 #5). El espejo depende de si hay una sesión de grabación, no del
-  `RecordingState` (que al llamar `start` todavía es `Init`):
+- **Espejo** (P13; codex r1 #5 y r2 #5). El espejo lo hace el `PipView` al dibujar
+  (`snapshot.translate` + `snapshot.scale(-1.0, 1.0)` cuando `mirrored` es `true`), no un
+  `videoflip` en el pipeline de la cámara. Así cambiarlo no espera ningún cuadro de la cámara:
+  basta con que GTK vuelva a dibujar la ventana.
   - `should_mirror(recording_active: bool) -> bool`.
   - `CameraPip::prepare_for_recording(&self) -> impl Future<Output = ()>`: pone
-    `video-direction = identity` y espera a que el `PipView` reciba **dos**
-    `invalidate-contents` del paintable (el primero puede ser un cuadro que ya venía espejado),
-    con un tope de 500 ms. `Window::toggle_record` lo `await`a **antes** de
-    `recording.start(...)`; así, aun sin cuenta regresiva, el primer cuadro que captura el
-    portal ya muestra la cámara sin espejar.
-  - `CameraPip::recording_finished()` vuelve a `horiz`; lo llama `handle_recording_finished`.
-  - Al crear o reiniciar el pipeline de la cámara, el `videoflip` arranca con el espejo que
-    corresponde a ese momento (`Window::recording_snapshot().is_some()`).
+    `mirrored = false`, `queue_draw()`, y espera **dos** `after-paint` del `gdk::FrameClock`
+    de la ventana del PiP (el primero dibuja la imagen nueva; el segundo asegura que el
+    compositor ya recibió ese cuadro), con un tope de 500 ms. Si vence el tope, es porque GTK no
+    está dibujando esa ventana —no está mapeada—, y entonces no hay en pantalla ningún cuadro
+    espejado que la captura pueda tomar; se loguea con `tracing::warn!` y se sigue.
+  - **Cuándo se llama:** dentro de `Recording::start_inner`, **después** del portal y del
+    selector de área y **antes** del `Timer` de la cuenta regresiva (o de poner el pipeline en
+    `PLAYING` si no hay demora). Mientras espera el portal, el estado sigue en `Init` y el PiP
+    sigue espejado, como pide la spec. `Recording` recibe el gancho con
+    `Recording::set_before_capture(f: Box<dyn Fn() -> LocalBoxFuture<'static, ()>>)`, que
+    `Window::toggle_record` fija **después** de guardar la grabación en `imp.recording` (un
+    segundo Ctrl+R en ese rato ve la grabación y la detiene, como hoy).
+  - `CameraPip::set_recording_active(bool)`: lo llama la ventana con `false` en
+    `handle_recording_finished` (vuelve a espejar) y con `true` desde el gancho. El `CameraPip`
+    nunca le pregunta a la ventana (fable r2 #1).
   - Sin PiP prendido, `prepare_for_recording` vuelve enseguida.
+  - **Test** `#[gtk::test] mirror_flag_flips_drawing`: un `PipView` con un paintable de prueba
+    de un píxel rojo a la izquierda y uno azul a la derecha; con `mirrored = true`, el
+    `gtk::Snapshot` resultante dibuja el rojo a la derecha (se compara el nodo con
+    `snapshot.to_node()` renderizado con `gsk::CairoRenderer` a una textura y leído).
   - La prueba del primer cuadro sin cuenta regresiva va en la etapa 8: grabar con demora 0 y
     mirar el primer cuadro del archivo.
 - **Fuente que desaparece**: un error en el bus del pipeline de la cámara apaga el PiP
@@ -1005,7 +1099,13 @@ alrededor.
   `framerate`.
 - [ ] Test de `drag_step`. El resto de esta tarea se verifica en la etapa 8 (requiere un
   compositor con capas).
-- [ ] `Application` crea el `CameraPip` en `startup` y lo guarda en un `OnceCell`.
+- [ ] `Application` crea el `CameraPip` en `startup` y lo guarda en un `OnceCell`. En
+  `startup` no hay ventana: el `CameraPip` arranca sin consultar a nadie, espejado, y se entera
+  del monitor de la ventana y de las grabaciones por los setters que llama `Window`.
+- [ ] **Cambiar de monitor** (fable r2 #3): una capa no se puede arrastrar de un monitor a otro.
+  Preferencias suma la fila «Camera Monitor» (un `AdwComboRow` con el nombre y el conector de
+  cada monitor) ligada a `camera-monitor`; al cambiar, el `CameraPip` recrea la ventana en ese
+  monitor y hace `relayout()`. La etapa 8 prueba el PiP en los tres monitores de Sebastián.
 
 ### Tarea 4.5 · Controles en la ventana, Preferencias y bandeja
 
@@ -1067,7 +1167,10 @@ Commit: `feat: draw a dashed border outside the recorded area`.
   (`src/pipeline.rs`, línea 107; codex r1 #13). `make_videocrop` la usa; el comportamiento del
   recorte no cambia.
 - [ ] **Paso 3:** test `odd_stream_size_uses_even_frame`: con `stream_size` `(1921, 1081)`,
-  `frame` es `(1922, 1082)`.
+  `frame` es `(1920, 1080)`: `round_to_even` es `number / 2 * 2` y redondea hacia abajo
+  (`src/pipeline.rs` línea 417; codex r2 #3, fable r2 #5). El test afirma además que `frame` es
+  igual a las dimensiones de las caps que `PipelineBuilder::build` le pone al `videoscale`
+  (extraer esas caps a una función pura `scaled_caps_size(stream_size)` que usen los dos).
 
 ### Tarea 5.2 · Geometría del borde
 
@@ -1090,30 +1193,34 @@ pub struct BorderGeometry {
 /// `stream_pixels` is the stream frame size; `stream_logical` is the stream's
 /// portal position and size in compositor logical coordinates; `monitor` is the
 /// monitor's logical geometry (x, y, w, h).
-pub fn border_geometry(
-    crop: Crop,
-    stream_logical: ((i32, i32), (i32, i32)),
-    monitor: (i32, i32, i32, i32),
-) -> Option<BorderGeometry>;
+/// Only for a stream that captures a whole monitor; `monitor` is that monitor's
+/// logical geometry (x, y, w, h) from `gdk::Monitor::geometry()`.
+pub fn border_geometry(crop: Crop, monitor: (i32, i32, i32, i32)) -> Option<BorderGeometry>;
 ```
 
-Escala = `stream_logical.size / crop.frame` (el cuadro par que recorta `videocrop`, no
-`stream_size`). Área lógica en el monitor =
-`stream_logical.position + crop * escala - monitor.origin`. Un lado se dibuja sólo si entre el
+La escala va **por eje** (fable r2 #6a): `sx = monitor.w / crop.frame.0`, `sy = monitor.h / crop.frame.1`.
+El tamaño lógico sale de la geometría del monitor de GDK, no del `size()` del portal (fable r2
+#6b): para un stream de monitor entero son el mismo rectángulo. Área local =
+`(crop.left * sx, crop.top * sy, (frame.0 - left - right) * sx, (frame.1 - top - bottom) * sy)`. Un lado se dibuja sólo si entre el
 área y el borde del monitor hay por lo menos `GAP + LINE_WIDTH`. Devuelve `None` si la escala
 no es finita o el área queda vacía.
 
 - [ ] **Tests primero:**
-  - `scale_one_centered`: crop `{100,200,920,380}`, stream 1920×1080, lógico `((0,0),(1920,1080))`,
-    monitor `(0,0,1920,1080)` → área `(200,100,800,600)`, cuatro lados.
-  - `hidpi_scale_two`: stream 3840×2160 con tamaño lógico 1920×1080 → el área se divide por 2.
-  - `second_monitor_offset`: stream en `(1920,0)`, monitor `(1920,0,1920,1080)` → área local sin
-    el desplazamiento.
+  - `scale_one_centered`: crop `{100,200,920,380}` con `frame` 1920×1080, monitor
+    `(0,0,1920,1080)` → área `(200,100,800,600)`, cuatro lados.
+  - `hidpi_scale_two`: `frame` 3840×2160 sobre un monitor de 1920×1080 → el área se divide por 2.
+  - `second_monitor_offset`: monitor `(1920,0,1920,1080)` → el área es local al monitor, sin el
+    desplazamiento.
+  - Los monitores reales de Sebastián (`kscreen-doctor -o`, 17/11/2026): `edp_scale_1_75`,
+    `frame` 2560×1600 sobre `eDP-1` 1463×915 en `(457,1080)`, escalas por eje distintas
+    (0,57148 y 0,57188); y `dp3_scale_1_05`, `frame` 1680×1050 sobre `DP-3` 1600×1000 en
+    `(1920,454)`.
   - `touching_left_edge_skips_left`: `left: 0` → `sides[3] == false` (criterio E2).
   - `fractional_scale`: cuadro 2880×1620 con tamaño lógico 1920×1080 (escala 1,5) y un recorte
     de `left` 300 → `x` del área = 200.
-  - `odd_frame`: `crop.frame` 1922×1082 sobre un lógico 1921×1081; el área no se corre más de
-    un píxel lógico respecto del cálculo con números reales.
+  - `odd_frame`: `crop.frame` 1920×1080 (de un stream de 1921×1081) sobre un monitor lógico
+    de 1921×1081; el área no se corre más de un píxel lógico respecto del cálculo con números
+    reales.
   - `line_stays_outside_crop`: para cualquier área, el rectángulo interior de la línea
     (`area` expandida en `GAP`) contiene el área entera (criterio E1 en la geometría).
 
@@ -1131,12 +1238,14 @@ no es finita o el área queda vacía.
   para cada lado habilitado, dibuja primero el segmento entero en gris `GRAY` y encima los
   guiones blancos (`set_dash(&[DASH, DASH], 0.0)`), con `line_width = LINE_WIDTH`, en el
   rectángulo `area` expandido en `GAP + LINE_WIDTH / 2`.
-- [ ] `Recording`: después de `AreaSelector::select`, si hay un solo stream, calcular
-  `border_geometry` con `compute_crop(&data)`, `stream.position()` y `stream.size()` (del
-  portal) y la geometría del monitor que contiene `stream.position()`
-  (`gdk::Display::default().monitors()`); si `position()` es `None` y hay un solo monitor, usar
-  ese. Guardar el resultado y el monitor en un campo `area_border: RefCell<Option<(BorderGeometry, gdk::Monitor)>>`
-  con getter.
+- [ ] `Recording`: después de `AreaSelector::select`, calcular el borde **sólo** si hay un
+  solo stream y `stream.source_type() == Some(SourceType::MONITOR)` (fable r2 #6c: un stream
+  de ventana no tiene borde). El monitor es el de `gdk::Display::default().monitors()` cuya
+  geometría tiene como origen `stream.position()`; si `position()` es `None` y hay un solo
+  monitor, ese; si no, no hay borde y se loguea. Si `stream.size()` existe y difiere del tamaño
+  del monitor, se loguea con `tracing::warn!` y se usa el del monitor. Guardar el resultado y el
+  monitor en `area_border: RefCell<Option<(BorderGeometry, gdk::Monitor)>>` con getter.
+  La ventana-capa del borde se crea sin la propiedad `application`.
 - [ ] `Window` (handler de estado): con `Delayed`, `Recording` o `Paused` y un borde calculado,
   mostrar el `AreaBorder` (crearlo una vez por grabación); con cualquier otro estado,
   destruirlo. Si `overlay::availability()` es `Err`, no se crea.
@@ -1207,17 +1316,31 @@ sistema real:
 | `tray(watcher: bool, desktop: &str)` | `NameHasOwner("org.kde.StatusNotifierWatcher")` en el bus de sesión | `false` → `Failed`; en GNOME el comando es `sudo apt install gnome-shell-extension-appindicator` |
 | `recordings_folder(path, exists: bool, writable: bool)` | `settings.saving_location()`; escribir y borrar un archivo temporal | No existe → `Failed`, `mkdir -p -- <ruta escapada>`; no se puede escribir → `Failed`, `ls -ld -- <ruta escapada>` y nota de permisos. La ruta pasa por `shell_quote` (codex r1 #10) |
 
-Paquetes por elemento (Ubuntu): `pipewiresrc` → `gstreamer1.0-pipewire`; `pulsesrc` →
-`gstreamer1.0-pulseaudio`; `videoconvert`, `videoscale`, `audioconvert`, `audioresample` →
-`gstreamer1.0-plugins-base`; `videocrop`, `videobalance`, `vp8enc`, `webmmux`,
-`matroskamux`, `v4l2src` → `gstreamer1.0-plugins-good`; `x264enc` → `gstreamer1.0-plugins-ugly`;
-cualquier otro → `gstreamer1.0-plugins-bad`.
+Paquetes por elemento (Ubuntu), verificados el 17/11/2026 con el registro de GStreamer y
+`dpkg -S` sobre el archivo de cada plugin (fable r2 #8):
+
+| Paquete | Elementos |
+|---|---|
+| `libgstreamer1.0-0` | `queue`, `capsfilter`, `identity`, `filesink` |
+| `gstreamer1.0-pipewire` | `pipewiresrc` |
+| `gstreamer1.0-plugins-base` | `videoconvert`, `videoscale`, `videorate`, `compositor`, `audioconvert`, `audioresample`, `audiomixer`, `audiorate`, `opusenc` |
+| `gstreamer1.0-plugins-good` | `pulsesrc`, `videocrop`, `videobalance`, `videoflip`, `v4l2src`, `vp8enc`, `vp9enc`, `webmmux`, `matroskamux`, `mp4mux`, `lamemp3enc`, `mpegaudioparse` |
+| `gstreamer1.0-plugins-ugly` | `x264enc` |
+| `gstreamer1.0-plugins-bad` | `h264parse`, `av1enc`, `vah264enc` (este último sin verificar: no está instalado) |
+| `gstreamer1.0-plugins-extra` | `vapostproc` |
+| Viene dentro de Kooha | `gifenc`, `gtk4paintablesink` (los registra `src/main.rs` de forma estática) |
+
+Un elemento que no está en la tabla da el problema «Unknown package for <elemento>» sin
+comando. **Test:** recorre `Profile::all()` (con `init_resources()`) y los elementos fijos del
+pipeline, y falla si alguno cae fuera de la tabla.
 
 - [ ] **`shell_quote(&str) -> String`**: envuelve en comillas simples y escribe cada `'`
-  interna como `'\''`. **Tests primero:** ruta con espacios, con `'`, con `"`, con `$(rm -rf ~)`,
-  con backticks y que empieza con `-`. Cada test corre
-  `sh -c "printf '%s\0' <ruta escapada>"` y afirma que la salida es exactamente la ruta
-  original seguida de un solo `\0`: un único argumento literal, sin que se haya ejecutado nada.
+  interna como `'\''`. **Tests primero**, sin ninguna carga destructiva (codex r2 #4): cada test
+  crea un directorio temporal propio `T` y usa rutas con espacios, con `'`, con `"`, que
+  empiezan con `-`, con `$(touch T/marker1)` y con `` `touch T/marker2` ``. Corre
+  `sh -c "printf '%s\0' <ruta escapada>"` y afirma dos cosas: la salida es exactamente la ruta
+  original seguida de un solo `\0` (un único argumento literal), y ni `T/marker1` ni
+  `T/marker2` existen.
 - [ ] **`Profile::required_elements(&self) -> Vec<String>`** en `src/profile.rs`: los nombres de
   fábrica de cada segmento de `videoenc_bin_str`, `audioenc_bin_str` y `muxer_bin_str` (primer
   token de cada parte separada por `!`, sin las caps ni las propiedades). Test con el perfil
@@ -1291,4 +1414,5 @@ capturas de pantalla de cada mejora y un video corto grabado con pausa y PiP.
 | El arrastre del PiP tiembla porque el `offset` se mide contra una superficie que se mueve | `drag_step` encapsulado; plan B en la tarea 4.4 |
 | `videobalance` no acepta el formato que entrega `pipewiresrc` | El test 3.3 usa `BGRx`, el formato habitual; si falla en la sesión real, agregar `videoconvert` antes del `videobalance` |
 | `gsettings-macro` no genera `(ii)` | Saltear la clave y escribir los métodos a mano (tarea 4.4) |
-| El portal de KDE no informa `position()` del stream | Con un solo monitor se usa ese; con varios, no hay borde y se loguea |
+| El portal de KDE no informa `position()` del stream | Con un solo monitor se usa ese; con varios, no hay borde y se loguea (Sebastián tiene tres: la etapa 8 lo comprueba) |
+| La captura toma un cuadro del PiP todavía espejado | El espejo se hace al dibujar, y `prepare_for_recording` espera dos `after-paint` antes de la cuenta regresiva (tarea 4.4) |
