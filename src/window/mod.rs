@@ -14,11 +14,13 @@ use std::cell::{Cell, RefCell};
 use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
     Application,
+    camera_pip::{self, devices::CameraSource},
     cancelled::Cancelled,
     capture_warnings::{CaptureWarnings, WarningsNotifier},
     config::PROFILE,
     format,
     help::ContextWithHelp,
+    overlay,
     preferences_dialog::PreferencesDialog,
     recording::{NoProfileError, Recording, RecordingState},
     settings::CaptureMode,
@@ -40,6 +42,8 @@ mod imp {
         pub(super) stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub(super) main_page: TemplateChild<adw::ToolbarView>,
+        #[template_child]
+        pub(super) camera_button: TemplateChild<gtk::MenuButton>,
         #[template_child]
         pub(super) forget_video_sources_revealer: TemplateChild<gtk::Revealer>,
         #[template_child]
@@ -120,6 +124,7 @@ mod imp {
             }
 
             obj.setup_settings();
+            obj.setup_camera_button();
 
             obj.update_view();
             obj.update_title_label();
@@ -129,6 +134,21 @@ mod imp {
     }
 
     impl WidgetImpl for Window {
+        fn realize(&self) {
+            self.parent_realize();
+
+            // On Wayland the compositor tells the monitor only after the
+            // first commit, so asking on `map` would give the wrong one
+            // (fable r3 #1).
+            if let Some(surface) = self.obj().surface() {
+                surface.connect_enter_monitor(|_, monitor| {
+                    if let Some(camera_pip) = Application::get().camera_pip() {
+                        camera_pip.set_kooha_monitor(Some(monitor.clone()));
+                    }
+                });
+            }
+        }
+
         fn map(&self) {
             self.parent_map();
 
@@ -427,6 +447,18 @@ impl Window {
             .replace(Some((recording.clone(), handler_ids)));
         imp.tray_duration_secs.set(0);
 
+        // Set after storing the recording, so a second Ctrl+R meanwhile stops it.
+        if let Some(camera_pip) = Application::get().camera_pip() {
+            let camera_pip = camera_pip.clone();
+            recording.set_before_capture(Box::new(move || {
+                let camera_pip = camera_pip.clone();
+                Box::pin(async move {
+                    camera_pip.set_recording_active(true);
+                    camera_pip.prepare_for_recording().await
+                })
+            }));
+        }
+
         // Show `Starting` while the portal dialog is open.
         self.update_tray();
         self.update_inhibit();
@@ -465,7 +497,11 @@ impl Window {
     ) {
         debug_assert_eq!(recording.state(), RecordingState::Finished);
 
-        Application::get().withdraw_notification("capture-warnings");
+        let app = Application::get();
+        app.withdraw_notification("capture-warnings");
+        if let Some(camera_pip) = app.camera_pip() {
+            camera_pip.set_recording_active(false);
+        }
 
         match res {
             Ok((recording_file, duration)) => {
@@ -711,7 +747,47 @@ impl Window {
         self.add_action(&settings.create_record_microphone_action());
         self.add_action(&settings.create_show_pointer_action());
         self.add_action(&settings.create_capture_mode_action());
+        self.add_action(&settings.create_camera_enabled_action());
+        self.add_action(&settings.create_camera_device_action());
     }
+
+    fn setup_camera_button(&self) {
+        let camera_button = &self.imp().camera_button;
+
+        if let Err(reason) = overlay::availability() {
+            tracing::debug!(
+                "Camera button disabled: overlays unavailable ({:?})",
+                reason
+            );
+            camera_button.set_sensitive(false);
+            camera_button.set_tooltip_text(Some(&gettext("Camera overlay unavailable")));
+            return;
+        }
+
+        // Refreshes the sources every time the menu opens, from the device
+        // monitor of the `CameraPip`.
+        camera_button.set_create_popup_func(|button| {
+            button.set_menu_model(Some(&camera_menu(&camera_pip::app_sources())));
+        });
+    }
+}
+
+/// The camera button menu: the on/off toggle and one radio item per source.
+fn camera_menu(sources: &[CameraSource]) -> gio::Menu {
+    let toggle_section = gio::Menu::new();
+    toggle_section.append(Some(&gettext("Show Camera")), Some("win.camera-enabled"));
+
+    let sources_section = gio::Menu::new();
+    for source in sources {
+        let item = gio::MenuItem::new(Some(&source.name), None);
+        item.set_action_and_target_value(Some("win.camera-device"), Some(&source.id.to_variant()));
+        sources_section.append_item(&item);
+    }
+
+    let menu = gio::Menu::new();
+    menu.append_section(None, &toggle_section);
+    menu.append_section(Some(&gettext("Camera Source")), &sources_section);
+    menu
 }
 
 /// One label per capture warning, styled as a chip.
@@ -730,6 +806,7 @@ fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera_pip::devices::CameraSource;
 
     #[gtk::test]
     fn warning_chips_have_one_label_per_warning() {
@@ -769,5 +846,84 @@ mod tests {
                     == Some("win.toggle-pause")
         });
         assert!(lists_toggle_pause);
+    }
+
+    #[gtk::test]
+    fn camera_button_follows_overlay_availability() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+        let button = window.imp().camera_button.get();
+
+        assert!(window.lookup_action("camera-enabled").is_some());
+        assert!(window.lookup_action("camera-device").is_some());
+
+        let available = crate::overlay::availability().is_ok();
+        assert_eq!(button.is_sensitive(), available);
+        if !available {
+            assert_eq!(
+                button.tooltip_text().as_deref(),
+                Some("Camera overlay unavailable")
+            );
+        }
+    }
+
+    #[gtk::test]
+    fn camera_menu_lists_sources() {
+        let sources = [
+            CameraSource {
+                id: "/dev/video0".to_string(),
+                name: "Webcam".to_string(),
+            },
+            CameraSource {
+                id: "OBS".to_string(),
+                name: "OBS Virtual Camera".to_string(),
+            },
+        ];
+
+        let menu = camera_menu(&sources);
+        let item = |section: i32, index: i32| {
+            let section = menu
+                .item_link(section, gio::MENU_LINK_SECTION)
+                .expect("menu has the section");
+            let label = section
+                .item_attribute_value(index, gio::MENU_ATTRIBUTE_LABEL, None)
+                .and_then(|value| value.get::<String>());
+            let action = section
+                .item_attribute_value(index, gio::MENU_ATTRIBUTE_ACTION, None)
+                .and_then(|value| value.get::<String>());
+            let target = section
+                .item_attribute_value(index, gio::MENU_ATTRIBUTE_TARGET, None)
+                .and_then(|value| value.get::<String>());
+            (label, action, target)
+        };
+
+        assert_eq!(
+            item(0, 0),
+            (
+                Some("Show Camera".to_string()),
+                Some("win.camera-enabled".to_string()),
+                None
+            )
+        );
+        assert_eq!(
+            item(1, 0),
+            (
+                Some("Webcam".to_string()),
+                Some("win.camera-device".to_string()),
+                Some("/dev/video0".to_string())
+            )
+        );
+        assert_eq!(
+            item(1, 1),
+            (
+                Some("OBS Virtual Camera".to_string()),
+                Some("win.camera-device".to_string()),
+                Some("OBS".to_string())
+            )
+        );
     }
 }

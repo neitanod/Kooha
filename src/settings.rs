@@ -202,6 +202,11 @@ pub(crate) mod test_utils {
         static INIT: Once = Once::new();
 
         INIT.call_once(|| {
+            // Register the type eagerly: `Profile::all` otherwise registers it
+            // lazily from a test thread while the GTK test thread builds the
+            // `Window` class, and the two can deadlock inside GLib.
+            gio::ZlibDecompressor::static_type();
+
             let path =
                 env::var("KOOHA_TEST_RESOURCES").unwrap_or_else(|_| RESOURCES_FILE.to_string());
             let res = gio::Resource::load(&path)

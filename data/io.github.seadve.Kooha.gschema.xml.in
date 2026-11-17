@@ -20,6 +20,28 @@
     <key type="b" name="pause-flash">
       <default>false</default>
     </key>
+    <key type="b" name="camera-enabled">
+      <default>false</default>
+    </key>
+    <key type="s" name="camera-device">
+      <default>""</default>
+    </key>
+    <key type="s" name="camera-shape">
+      <choices>
+        <choice value="circle"/>
+        <choice value="rounded-rectangle"/>
+      </choices>
+      <default>"circle"</default>
+    </key>
+    <key type="u" name="camera-size">
+      <default>200</default>
+    </key>
+    <key type="(ii)" name="camera-position">
+      <default>(-1, -1)</default>
+    </key>
+    <key type="s" name="camera-monitor">
+      <default>""</default>
+    </key>
     <key type="u" name="record-delay">
       <default>0</default>
     </key>

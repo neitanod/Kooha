@@ -28,6 +28,9 @@ pub struct TrayModel {
     pub show_pointer: bool,
     /// Whether the active profile supports audio.
     pub audio_supported: bool,
+    pub camera_enabled: bool,
+    /// Whether overlays are available to show the camera.
+    pub camera_available: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +40,7 @@ pub enum TrayCommand {
     ToggleDesktopAudio,
     ToggleMicrophone,
     TogglePointer,
+    ToggleCamera,
     ShowWindow,
     Quit,
 }
@@ -124,6 +128,13 @@ pub fn menu_entries(model: &TrayModel) -> Vec<TrayEntry> {
         command: TrayCommand::TogglePointer,
         enabled: is_idle,
     });
+    // The camera is on screen, so it can change at any time.
+    entries.push(TrayEntry::Check {
+        label: gettext("Camera"),
+        checked: model.camera_enabled,
+        command: TrayCommand::ToggleCamera,
+        enabled: model.camera_available,
+    });
     entries.push(TrayEntry::Separator);
 
     entries.push(TrayEntry::Button {
@@ -184,6 +195,8 @@ mod tests {
             record_microphone: false,
             show_pointer: true,
             audio_supported: true,
+            camera_enabled: false,
+            camera_available: true,
         }
     }
 
@@ -236,6 +249,7 @@ mod tests {
                 (TrayCommand::ToggleDesktopAudio, true, true),
                 (TrayCommand::ToggleMicrophone, false, true),
                 (TrayCommand::TogglePointer, true, true),
+                (TrayCommand::ToggleCamera, false, true),
             ]
         );
         assert_eq!(
@@ -272,6 +286,7 @@ mod tests {
                 (TrayCommand::ToggleDesktopAudio, true, false),
                 (TrayCommand::ToggleMicrophone, false, false),
                 (TrayCommand::TogglePointer, true, false),
+                (TrayCommand::ToggleCamera, false, true),
             ]
         );
     }
@@ -298,7 +313,10 @@ mod tests {
             assert_eq!(entries[0], TrayEntry::Label(status.to_string()));
             assert!(!record_button(&entries).1, "{state:?}");
             assert!(
-                checks(&entries).iter().all(|(_, _, enabled)| !enabled),
+                checks(&entries)
+                    .iter()
+                    .filter(|(command, _, _)| *command != TrayCommand::ToggleCamera)
+                    .all(|(_, _, enabled)| !enabled),
                 "{state:?}"
             );
         }
@@ -315,6 +333,7 @@ mod tests {
                 (TrayCommand::ToggleDesktopAudio, true, false),
                 (TrayCommand::ToggleMicrophone, false, false),
                 (TrayCommand::TogglePointer, true, true),
+                (TrayCommand::ToggleCamera, false, true),
             ]
         );
     }
@@ -433,5 +452,50 @@ mod tests {
         ] {
             assert!(!has_pause_button(&menu_entries(&model(state))), "{state:?}");
         }
+    }
+
+    fn position(entries: &[TrayEntry], wanted: impl Fn(&TrayEntry) -> bool) -> usize {
+        entries.iter().position(wanted).expect("menu has the entry")
+    }
+
+    #[test]
+    fn camera_check() {
+        let mut model = model(TrayRecordingState::Recording);
+        model.camera_enabled = true;
+
+        let entries = menu_entries(&model);
+        let camera = position(&entries, |entry| {
+            matches!(
+                entry,
+                TrayEntry::Check {
+                    command: TrayCommand::ToggleCamera,
+                    ..
+                }
+            )
+        });
+        let show_window = position(&entries, |entry| {
+            matches!(
+                entry,
+                TrayEntry::Button {
+                    command: TrayCommand::ShowWindow,
+                    ..
+                }
+            )
+        });
+
+        assert!(camera < show_window);
+        // Enabled even while recording.
+        assert_eq!(
+            entries[camera],
+            TrayEntry::Check {
+                label: "Camera".to_string(),
+                checked: true,
+                command: TrayCommand::ToggleCamera,
+                enabled: true,
+            }
+        );
+
+        model.camera_available = false;
+        assert!(checks(&menu_entries(&model)).contains(&(TrayCommand::ToggleCamera, true, false)));
     }
 }

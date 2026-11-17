@@ -8,9 +8,10 @@ use gtk::{
 
 use crate::{
     about,
+    camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
-    format,
+    format, overlay,
     preferences_dialog::PreferencesDialog,
     settings::Settings,
     tray::{TrayCommand, TrayModel, TrayRequest, TrayService, model::tray_state},
@@ -26,6 +27,7 @@ mod imp {
     pub struct Application {
         pub(super) settings: OnceCell<Settings>,
         pub(super) tray: OnceCell<TrayService>,
+        pub(super) camera_pip: OnceCell<CameraPip>,
         /// The last snapshot the window sent, reused on settings changes.
         pub(super) tray_snapshot: Cell<Option<RecordingSnapshot>>,
     }
@@ -64,6 +66,7 @@ mod imp {
             obj.setup_gactions();
             obj.setup_accels();
             obj.setup_tray();
+            obj.setup_camera_pip();
         }
     }
 
@@ -111,6 +114,18 @@ impl Application {
 
             settings
         })
+    }
+
+    /// The camera `PiP`, created in `startup`.
+    pub fn camera_pip(&self) -> Option<&CameraPip> {
+        self.imp().camera_pip.get()
+    }
+
+    fn setup_camera_pip(&self) {
+        // Without a window yet: the PiP starts mirrored, on the saved or the
+        // first monitor, and the window tells it the rest.
+        let camera_pip = CameraPip::new(self.settings());
+        self.imp().camera_pip.set(camera_pip).unwrap();
     }
 
     pub fn window(&self) -> Window {
@@ -223,6 +238,11 @@ impl Application {
             self,
             move |_| obj.refresh_tray()
         ));
+        settings.connect_camera_enabled_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
     }
 
     fn handle_tray_command(&self, request: TrayRequest) {
@@ -245,6 +265,10 @@ impl Application {
                 {
                     tracing::warn!("Failed to toggle pause from the tray: {:?}", err);
                 }
+            }
+            TrayCommand::ToggleCamera => {
+                let settings = self.settings();
+                settings.set_camera_enabled(!settings.camera_enabled());
             }
             TrayCommand::ShowWindow => self.present_window(activation_token.as_deref()),
             TrayCommand::Quit => {
@@ -398,6 +422,8 @@ fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayM
         audio_supported: settings
             .profile()
             .is_none_or(|profile| profile.supports_audio()),
+        camera_enabled: settings.camera_enabled(),
+        camera_available: overlay::availability().is_ok(),
     }
 }
 
@@ -421,6 +447,7 @@ fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: 
         TrayCommand::TogglePointer => settings.set_show_pointer(!settings.show_pointer()),
         TrayCommand::ToggleRecord
         | TrayCommand::TogglePause
+        | TrayCommand::ToggleCamera
         | TrayCommand::ShowWindow
         | TrayCommand::Quit => return false,
     }
@@ -516,10 +543,44 @@ mod tests {
         let check_states = menu_entries(&model)
             .into_iter()
             .filter_map(|entry| match entry {
-                TrayEntry::Check { enabled, .. } => Some(enabled),
+                TrayEntry::Check {
+                    command, enabled, ..
+                } if command != TrayCommand::ToggleCamera => Some(enabled),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(check_states, [false, false, false]);
+    }
+
+    #[gtk::test]
+    fn tray_toggles_camera_also_while_recording() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        // Without `startup` there is no `CameraPip`, so nothing opens the camera.
+        let app = Application::new();
+        let settings = app.settings();
+        settings.reset("camera-enabled");
+
+        app.handle_tray_command(TrayRequest {
+            command: TrayCommand::ToggleCamera,
+            activation_token: None,
+        });
+        assert!(settings.camera_enabled());
+        assert!(tray_model(None, settings).camera_enabled);
+        assert_eq!(
+            tray_model(None, settings).camera_available,
+            overlay::availability().is_ok()
+        );
+
+        app.handle_tray_command(TrayRequest {
+            command: TrayCommand::ToggleCamera,
+            activation_token: None,
+        });
+        assert!(!settings.camera_enabled());
+
+        settings.reset("camera-enabled");
     }
 }

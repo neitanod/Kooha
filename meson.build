@@ -17,6 +17,7 @@ dependency('gtk4', version: '>= 4.15.3')
 dependency('libadwaita-1', version: '>= 1.9')
 dependency('gstreamer-1.0', version: '>= 1.24')
 dependency('gstreamer-plugins-base-1.0', version: '>= 1.24')
+layer_shell_dep = dependency('gtk4-layer-shell-0', required: get_option('layer-shell'))
 
 glib_compile_resources = find_program('glib-compile-resources', required: true)
 glib_compile_schemas = find_program('glib-compile-schemas', required: true)

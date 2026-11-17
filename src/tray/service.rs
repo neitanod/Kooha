@@ -198,6 +198,8 @@ mod tests {
             record_microphone: true,
             show_pointer: true,
             audio_supported: true,
+            camera_enabled: false,
+            camera_available: true,
         }
     }
 

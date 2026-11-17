@@ -57,6 +57,62 @@
           </object>
         </child>
         <child>
+          <!-- The title is set in code: it is markup and has an ampersand. -->
+          <object class="AdwPreferencesGroup" id="camera_group">
+            <child>
+              <object class="AdwActionRow" id="overlays_warning_row">
+                <property name="visible">False</property>
+                <property name="title" translatable="yes">Overlays unavailable</property>
+                <style>
+                  <class name="warning"/>
+                </style>
+                <child type="prefix">
+                  <object class="GtkImage">
+                    <property name="icon-name">dialog-warning-symbolic</property>
+                  </object>
+                </child>
+                <child type="suffix">
+                  <object class="GtkButton" id="open_report_button">
+                    <!-- Shown once the requirements report exists. -->
+                    <property name="visible">False</property>
+                    <property name="valign">center</property>
+                    <property name="label" translatable="yes">Open Report</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="AdwSwitchRow" id="camera_enabled_row">
+                <property name="title" translatable="yes">Show Camera</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="camera_source_row">
+                <property name="title" translatable="yes">Camera Source</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="camera_shape_row">
+                <property name="title" translatable="yes">Camera Shape</property>
+                <property name="subtitle" translatable="yes">Right-click the camera to switch</property>
+                <property name="model">
+                  <object class="GtkStringList">
+                    <items>
+                      <item translatable="yes">Circle</item>
+                      <item translatable="yes">Rounded Rectangle</item>
+                    </items>
+                  </object>
+                </property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="camera_monitor_row">
+                <property name="title" translatable="yes">Camera Monitor</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
           <object class="AdwPreferencesGroup">
             <property name="title" translatable="yes">Video</property>
             <child>

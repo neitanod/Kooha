@@ -31,6 +31,10 @@ button.copy-done {
   color: var(--accent-bg-color);
 }
 
+window.camera-pip {
+  background: none;
+}
+
 window.area-selector .view-port {
   padding: 12px;
   padding-top: 6px;

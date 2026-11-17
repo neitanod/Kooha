@@ -26,6 +26,7 @@
 mod about;
 mod application;
 mod area_selector;
+mod camera_pip;
 mod cancelled;
 mod capture_warnings;
 mod config;
@@ -35,6 +36,7 @@ mod format;
 mod help;
 mod i18n;
 mod item_row;
+mod overlay;
 mod pause_gate;
 mod pipeline;
 mod preferences_dialog;

@@ -8,3 +8,9 @@ option(
   value: 'default',
   description: 'The build profile for Kooha. One of "default" or "development".'
 )
+option(
+  'layer-shell',
+  type: 'feature',
+  value: 'auto',
+  description: 'Show the camera and the area border as screen overlays with gtk4-layer-shell.'
+)

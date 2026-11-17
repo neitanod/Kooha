@@ -107,6 +107,12 @@
                             <property name="toggled-tooltip-text" translatable="yes">Hide Pointer</property>
                           </object>
                         </child>
+                        <child>
+                          <object class="GtkMenuButton" id="camera_button">
+                            <property name="icon-name">camera-web-symbolic</property>
+                            <property name="tooltip-text" translatable="yes">Camera</property>
+                          </object>
+                        </child>
                       </object>
                     </child>
                     <child>

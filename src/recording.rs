@@ -3,8 +3,10 @@ use std::{
     error,
     ffi::OsStr,
     fmt,
+    future::Future,
     os::fd::{IntoRawFd, OwnedFd},
     path::{Path, PathBuf},
+    pin::Pin,
     rc::Rc,
     time::Duration,
 };
@@ -89,6 +91,21 @@ impl CaptureConfig {
     }
 }
 
+/// Runs right before the capture begins: before the countdown or, without
+/// one, before the pipeline plays. An error aborts the recording.
+pub type BeforeCapture = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>>>>>;
+
+#[derive(Default)]
+struct BeforeCaptureHook(Option<BeforeCapture>);
+
+impl fmt::Debug for BeforeCaptureHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BeforeCaptureHook")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Boxed)]
 #[boxed_type(name = "KoohaRecordingState")]
 pub enum RecordingState {
@@ -132,6 +149,7 @@ mod imp {
 
         pub(super) estimated_final_duration: Cell<Option<gst::ClockTime>>,
         pub(super) pause_gate: PauseGate,
+        pub(super) before_capture: RefCell<BeforeCaptureHook>,
 
         pub(super) timer: RefCell<Option<Timer>>,
         pub(super) session: RefCell<Option<Session>>,
@@ -187,6 +205,14 @@ glib::wrapper! {
 impl Recording {
     pub fn new() -> Self {
         glib::Object::new()
+    }
+
+    /// Sets what runs right before the capture begins; the camera `PiP`
+    /// unmirrors itself there (P13).
+    pub fn set_before_capture(&self, f: BeforeCapture) {
+        self.imp()
+            .before_capture
+            .replace(BeforeCaptureHook(Some(f)));
     }
 
     pub async fn start(&self, parent: Option<&impl IsA<gtk::Window>>, settings: &Settings) {
@@ -283,6 +309,14 @@ impl Recording {
             )
         })?;
         imp.pipeline.set(pipeline.clone()).unwrap();
+
+        // After the portal and the area selector, before the countdown.
+        let before_capture = imp.before_capture.borrow().0.as_ref().map(|f| f());
+        if let Some(before_capture) = before_capture {
+            before_capture
+                .await
+                .context(gettext("The camera overlay did not refresh in time"))?;
+        }
 
         // Setup and run timer
         let timer = Timer::new(

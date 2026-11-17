@@ -150,6 +150,42 @@ msgstr "Carpeta de grabaciones"
 msgid "Destination folder for the recordings"
 msgstr "Carpeta de destino de las grabaciones"
 
+#: data/resources/ui/preferences_dialog.ui:65
+msgid "Overlays unavailable"
+msgstr "Capas no disponibles"
+
+#: data/resources/ui/preferences_dialog.ui:79
+msgid "Open Report"
+msgstr "Abrir reporte"
+
+#: data/resources/ui/preferences_dialog.ui:86 src/window/mod.rs:774
+msgid "Show Camera"
+msgstr "Mostrar cámara"
+
+#: data/resources/ui/preferences_dialog.ui:91 src/window/mod.rs:788
+msgid "Camera Source"
+msgstr "Fuente de la cámara"
+
+#: data/resources/ui/preferences_dialog.ui:96
+msgid "Camera Shape"
+msgstr "Forma de la cámara"
+
+#: data/resources/ui/preferences_dialog.ui:97
+msgid "Right-click the camera to switch"
+msgstr "Clic derecho sobre la cámara para cambiarla"
+
+#: data/resources/ui/preferences_dialog.ui:101
+msgid "Circle"
+msgstr "Círculo"
+
+#: data/resources/ui/preferences_dialog.ui:102
+msgid "Rounded Rectangle"
+msgstr "Rectángulo redondeado"
+
+#: data/resources/ui/preferences_dialog.ui:110
+msgid "Camera Monitor"
+msgstr "Monitor de la cámara"
+
 #: data/resources/ui/preferences_dialog.ui:50
 msgid "Video"
 msgstr "Vídeo"
@@ -268,6 +304,10 @@ msgstr "Mostrar puntero"
 msgid "Hide Pointer"
 msgstr "Ocultar puntero"
 
+#: data/resources/ui/window.ui:113 src/tray/model.rs:133
+msgid "Camera"
+msgstr "Cámara"
+
 #: data/resources/ui/window.ui:117 src/tray/model.rs:83
 msgid "Start Recording"
 msgstr "Iniciar grabación"
@@ -349,6 +389,26 @@ msgstr "Mostrar en Archivos"
 msgid "Recording started"
 msgstr "Grabación iniciada"
 
+#: src/camera_pip/caps.rs
+msgid "No camera found"
+msgstr "No se encontró ninguna cámara"
+
+#: src/camera_pip/caps.rs
+msgid "Camera disconnected"
+msgstr "La cámara se desconectó"
+
+#: src/camera_pip/caps.rs
+msgid "Could not open the camera"
+msgstr "No se pudo abrir la cámara"
+
+#: src/camera_pip/caps.rs
+msgid "Camera format not supported"
+msgstr "La cámara usa un formato no compatible"
+
+#: src/preferences_dialog.rs
+msgid "Disconnected Camera"
+msgstr "Cámara desconectada"
+
 #: src/capture_warnings.rs:39
 msgid "Without audio"
 msgstr "Sin audio"
@@ -398,6 +458,14 @@ msgstr[1] "{time} segundos"
 msgid "Failed to set recordings folder"
 msgstr "No se pudo configurar la carpeta de grabaciones"
 
+#: src/preferences_dialog.rs:233
+msgid "Automatic"
+msgstr "Automático"
+
+#: src/preferences_dialog.rs:311
+msgid "Camera & Overlays"
+msgstr "Cámara y capas"
+
 #: src/preferences_dialog.rs:236
 msgid "This frame rate may cause performance issues on the selected format."
 msgstr ""
@@ -411,6 +479,14 @@ msgstr "Este formato es experimental y no está respaldado."
 #: src/preferences_dialog.rs:307 src/window/mod.rs:557
 msgid "None"
 msgstr "Ninguno"
+
+#: src/preferences_dialog.rs:681
+msgid "Kooha was built without gtk4-layer-shell."
+msgstr "Kooha se compiló sin gtk4-layer-shell."
+
+#: src/preferences_dialog.rs:683
+msgid "Your desktop does not support screen overlays."
+msgstr "Su escritorio no admite capas sobre la pantalla."
 
 #: src/recording.rs:42
 msgid "No active profile"
@@ -428,6 +504,10 @@ msgstr "Consulte {link} para obtener ayuda."
 #: src/recording.rs:227
 msgid "A GStreamer plugin may not be installed."
 msgstr "Es posible que no se haya instalado un complemento de GStreamer."
+
+#: src/recording.rs:316
+msgid "The camera overlay did not refresh in time"
+msgstr "La cámara en pantalla no se actualizó a tiempo"
 
 #: src/recording.rs:277 src/recording.rs:506
 msgid "Make sure that the saving location exists and is accessible."
@@ -573,6 +653,10 @@ msgstr "Normal"
 #: src/window/mod.rs:545
 msgid "Selection"
 msgstr "Selección"
+
+#: src/window/mod.rs:760
+msgid "Camera overlay unavailable"
+msgstr "La cámara en pantalla no está disponible"
 
 #~ msgid "Donate (Buy Me a Coffee)"
 #~ msgstr "Donar (cómprame un café)"
