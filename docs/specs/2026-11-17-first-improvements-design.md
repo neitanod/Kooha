@@ -24,7 +24,7 @@ borde del área que graba, y diagnosticar por qué Kooha no anda.
 
 ## Alcance
 
-Seis mejoras, en este orden, un commit por mejora encadenado sobre el anterior (P21, P22):
+Seis mejoras, en este orden, un commit por mejora encadenado sobre el anterior (P20, P21):
 
 1. Avisos de captura.
 2. Ícono de bandeja con menú y toggles.
@@ -33,8 +33,8 @@ Seis mejoras, en este orden, un commit por mejora encadenado sobre el anterior (
 5. Borde del área.
 6. Reporte de requisitos.
 
-Textos nuevos en inglés en el código, con su traducción en `po/es.po` (P20). Estilo de
-Kooha, sin romper GNOME ni X11 (P21).
+Textos nuevos en inglés en el código, con su traducción en `po/es.po` (P19). Estilo de
+Kooha, sin romper GNOME ni X11 (P20).
 
 ## Fuera de alcance
 
@@ -137,7 +137,7 @@ Criterios:
   un monitor a otro, así que Preferencias tiene la fila «Camera Monitor» para pasarlo a otro
   (decisión del orquestador en la ronda 2 del plan, avisada en el Hilo, Mensaje 15370).
 - Sin capas disponibles, los controles del PiP se ven deshabilitados y Preferencias muestra el
-  aviso (P18).
+  aviso (P16).
 - Si la fuente elegida desaparece, el PiP se apaga y se notifica.
 
 Criterios:
@@ -157,7 +157,7 @@ Criterios:
   calculado con el mismo redondeo que `make_videocrop`. Si el área toca un borde del monitor,
   ese lado no se dibuja.
 - La capa es transparente al mouse.
-- Sin capas disponibles, no hay borde (P18).
+- Sin capas disponibles, no hay borde (P16).
 
 Criterios:
 
@@ -166,7 +166,7 @@ Criterios:
 
 ## 6 · Reporte de requisitos
 
-**Chequeos** (P16), cada uno `Ok`, `Warning` o `Failed`:
+**Chequeos** (P17), cada uno `Ok`, `Warning` o `Failed`:
 
 | Chequeo | Falla si |
 |---|---|
@@ -179,7 +179,7 @@ Criterios:
 | Bandeja | Nadie tiene el nombre D-Bus `org.kde.StatusNotifierWatcher` |
 | Carpeta de grabaciones | No existe o no se puede escribir |
 
-**Presentación** (P17):
+**Presentación** (P18):
 
 - Diálogo «Requirements Report» desde el menú principal: un checklist con tilde verde o
   cruz roja (y signo de advertencia amarillo para `Warning`). **Sólo debajo de cada falla**:

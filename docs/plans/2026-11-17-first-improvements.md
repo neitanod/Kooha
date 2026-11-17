@@ -43,12 +43,12 @@ original `/home/sebas/robotin/apps/kooha` no se toca.
 | P13 | Espejado antes de grabar, sin espejar grabando | Chunk 4, tareas 4.1 y 4.4 |
 | P14 | Borde en cuenta regresiva, grabando y en pausa | Chunk 5, tarea 5.3 |
 | P15 | Borde punteado blanco sobre gris claro, opaco | Chunk 5, tarea 5.2 |
-| P16 | Ocho chequeos | Chunk 6, tarea 6.2 |
-| P17 | Checklist con detalle sólo en las fallas, copiar, `--check`, botón en el error | Chunk 6 |
-| P18 | gtk4-layer-shell opcional; aviso en Preferencias | Chunk 4, tareas 4.0 y 4.5 |
-| P20 | Inglés en el código y traducción en `po/es.po` | Todos los chunks, último paso |
-| P21 | Fork limpio: un commit por mejora, estilo de Kooha | Todos los chunks |
-| P22 | Todo en esta Task, en orden, commits encadenados | Grafo de chunks |
+| P17 | Ocho chequeos | Chunk 6, tarea 6.2 |
+| P18 | Checklist con detalle sólo en las fallas, copiar, `--check`, botón en el error | Chunk 6 |
+| P16 | gtk4-layer-shell opcional; aviso en Preferencias | Chunk 4, tareas 4.0 y 4.5 |
+| P19 | Inglés en el código y traducción en `po/es.po` | Todos los chunks, último paso |
+| P20 | Fork limpio: un commit por mejora, estilo de Kooha | Todos los chunks |
+| P21 | Todo en esta Task, en orden, commits encadenados | Grafo de chunks |
 
 ---
 
@@ -61,6 +61,7 @@ Meson.
 export CARGO_HOME=$PWD/_build/cargo-home
 export KOOHA_TEST_RESOURCES=$PWD/_build/data/resources/resources.gresource
 ninja -C _build                                            # build completo; genera los recursos
+# a mitad de un paso TDD que todavía no compila: ninja -C _build data/resources/resources.gresource
 cargo test --target-dir _build/src                         # suite
 cargo test --target-dir _build/src --features layer-shell  # suite con capas (desde el chunk 4)
 cargo clippy --target-dir _build/src -- -D warnings        # linter (y con --features layer-shell)
@@ -125,7 +126,7 @@ portal del Kooha instalado.
 
 ## Grafo de chunks
 
-P22 pide los commits encadenados en el orden de las mejoras, y casi todos los chunks tocan los
+P21 pide los commits encadenados en el orden de las mejoras, y casi todos los chunks tocan los
 mismos archivos (`application.rs`, `window/mod.rs`, `window.ui`, el schema, `po/es.po`). Por eso
 el grafo es una cadena: una tanda por chunk, un chunk por tanda.
 
@@ -436,10 +437,16 @@ pub fn send_capture_warnings_notification(&self, warnings: &CaptureWarnings) {
   `fn should_notify(already_notified: bool, state: RecordingState, warnings: &CaptureWarnings) -> bool`.
   Casos: `Recording` sin notificar y con avisos → `true`; ya notificado → `false` (una pausa y
   su reanudación no notifican de nuevo); `Delayed` → `false`; avisos vacíos → `false`.
-- [ ] **Paso 3:** en `Window`, un `Cell<bool>` `warnings_notified` que se pone en `false` en
-  `toggle_record` al crear la grabación. En el handler de `connect_state_notify`, si
-  `should_notify(...)`, mandar la notificación y ponerlo en `true`.
-- [ ] **Paso 4:** la prueba con la notificación real va en la etapa 8.
+- [ ] **Paso 3: test que falla** del cableado (codex r3 #3): `WarningsNotifier` (en
+  `capture_warnings.rs`) guarda si ya notificó y recibe el emisor como clausura:
+  `fn on_state(&self, state: RecordingState, warnings: &CaptureWarnings, send: impl FnOnce(&CaptureWarnings))`.
+  Test `notifies_once_per_recording`: la secuencia `Delayed`, `Recording`, `Paused`,
+  `Recording`, `Flushing` llama `send` **una** vez; después de `reset()` (grabación nueva), otra
+  vez una.
+- [ ] **Paso 4:** en `Window`, un `WarningsNotifier` que se resetea en `toggle_record` al crear
+  la grabación; el handler de `connect_state_notify` llama `on_state` con un `send` que usa
+  `send_capture_warnings_notification`.
+- [ ] **Paso 5:** la prueba con la notificación real va en la etapa 8 (A1).
 
 ### Tarea 1.6 · Traducciones, verificación y commit
 
@@ -580,7 +587,8 @@ impl ksni::Tray for KoohaTray {
   `#[ignore]` porque necesita un bus de sesión propio, y corrido así, sin tocar el D-Bus de
   Sebastián:
   `dbus-run-session -- cargo test --target-dir _build/src -- --ignored tray::service::tests::spawn_without_watcher_does_not_fail`.
-  En ese bus no hay `StatusNotifierWatcher`: `TrayService::spawn` devuelve un servicio sin
+  El test no usa GTK: un proceso GTK dentro de `dbus-run-session` activa los portales en ese
+  bus y deja `xdg-desktop-portal-kde` huérfano (fable r3 #6). En ese bus no hay `StatusNotifierWatcher`: `TrayService::spawn` devuelve un servicio sin
   handle, `update` no hace nada y el test termina en menos de 5 s (lo afirma midiendo).
 - [ ] **Paso 2–4:** falla, implementar, pasa.
 
@@ -624,8 +632,17 @@ impl ksni::Tray for KoohaTray {
   actualizar D-Bus cinco veces por segundo), `handle_recording_finished`, y los
   `connect_*_changed` de `record-desktop-audio`, `record-microphone`, `show-pointer` y
   `profile-id` en `Application::startup`.
-- [ ] **Paso 4: test** `#[gtk::test] app_and_window_construct`: construye `Application` y
-  `Window::new(&app)` sin presentarla y termina; detecta el bucle de `constructed` → `window()`.
+- [ ] **Paso 4: test** `#[gtk::test] app_and_window_construct`: inicializa `setup_schema()`,
+  `init_resources()` y `gst::init()`, construye `Application` y `Window::new(&app)` sin
+  presentarla, y termina; detecta el bucle de `constructed` → `window()`. **No** llama
+  `register()` ni `run()`: eso correría `startup`, tomaría el nombre D-Bus de Kooha y pondría un
+  ícono en la bandeja real de Sebastián (fable r3 #3). `update_tray` no hace nada si el tray
+  todavía no existe.
+  Test `apply_tray_command_syncs_window_action` (codex r3 #3): la función
+  `apply_tray_command(cmd, &settings, has_recording) -> bool`, que despacha los toggles,
+  cambia `record-microphone`, y la acción `settings.create_record_microphone_action()` —la
+  misma que usa la ventana— refleja el estado nuevo; con `has_recording = true` no cambia
+  nada.
   Otro test `#[gtk::test] tray_shows_starting_while_portal_pending`: con un
   `recording_snapshot` en `Init`, el `TrayModel` que arma `update_tray` tiene estado
   `Starting` y las tres casillas de captura deshabilitadas (se prueba la función que arma el
@@ -811,6 +828,12 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
   - Test primero de una función pura
     `fn flushing_progress(processed: gst::ClockTime, estimated: gst::ClockTime) -> u8`
     (0 con `estimated` cero; redondeo; tope 100) y moverle la cuenta de hoy.
+  - Test con un pipeline sintético **atrasado** (codex r3 #3), sin portal:
+    `videotestsrc is-live=true ! identity name=gate ! queue ! identity sleep-time=40000 ! fakesink sync=false`
+    (cada buffer tarda 40 ms en pasar, más que los 33 ms entre cuadros, así la cola se llena).
+    Grabar 1 s, detener (EOS) y muestrear `flushing_progress(query_position, estimated)` cada
+    50 ms hasta el EOS: el primer valor es menor que 100, los valores no bajan, y el último es
+    100. Lo mismo deteniendo en pausa.
   - `stop()`: `estimated_final_duration = gate.recorded_duration(current_running_time)`;
     después de `set_state(Flushing)`, llamar `update_duration()` (que en `Flushing` ya lee
     `query_position`) **antes** de `update_flushing_progress()`.
@@ -826,8 +849,9 @@ recibe el `PauseGate` con un método `pause_gate(&mut self, gate: PauseGate)` y 
 
 - [ ] En `window.ui`, `pause_record_button`: sacar `<property name="visible">False</property>`.
 - [ ] En `application.rs`, descomentar `set_accels_for_action("win.toggle-pause", &["<Control>k"])`
-  y borrar el comentario del issue 112. `data/resources/ui/shortcuts.ui` ya trae la entrada de
-  `win.toggle-pause` (línea 51): comprobar que se ve en la ventana de atajos.
+  y borrar el comentario del issue 112. En `data/resources/ui/shortcuts.ui`, descomentar el
+  `AdwShortcutsItem` de `win.toggle-pause` (líneas 48–53, hoy entre `<!--` y `-->`) y comprobar
+  que se ve en la ventana de atajos.
 - [ ] En Preferencias, grupo nuevo «Recording» después de «General», con `AdwSwitchRow`
   `pause_flash_row` («Flash on Resume», subtítulo «Mark each resume with a short white
   flash»), ligado con `bind_pause_flash(&row, "active")`.
@@ -1038,8 +1062,10 @@ esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para 
   la ventana con `overlay::init_overlay` en el monitor que resuelve
   `resolve_monitor(saved_connector, kooha_window_monitor, monitors)` — función pura con test:
   el de `camera-monitor` si está conectado; si no, el monitor donde está la ventana de Kooha
-  (`display.monitor_at_surface`, que la ventana le pasa con
-  `CameraPip::set_kooha_monitor(Option<gdk::Monitor>)` al mapearse); si no, el primero de la
+  (la ventana se lo pasa con `CameraPip::set_kooha_monitor(Option<gdk::Monitor>)` desde
+  `surface.connect_enter_monitor`, gdk4 0.11.2 `src/auto/surface.rs` línea 274: en Wayland el
+  compositor avisa en qué monitor está la superficie recién después del primer commit, así que
+  consultarlo en `map` daría el monitor del origen; fable r3 #1); si no, el primero de la
   lista —, posición
   `camera-position` (si es `(-1,-1)`, `default_position`), `clamp_position`, y `present()`.
 - **Apagar**: pipeline a `NULL`, `window.destroy()`.
@@ -1062,17 +1088,31 @@ esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para 
   `videoflip` en el pipeline de la cámara. Así cambiarlo no espera ningún cuadro de la cámara:
   basta con que GTK vuelva a dibujar la ventana.
   - `should_mirror(recording_active: bool) -> bool`.
-  - `CameraPip::prepare_for_recording(&self) -> impl Future<Output = ()>`: pone
-    `mirrored = false`, `queue_draw()`, y espera **dos** `after-paint` del `gdk::FrameClock`
-    de la ventana del PiP (el primero dibuja la imagen nueva; el segundo asegura que el
-    compositor ya recibió ese cuadro), con un tope de 500 ms. Si vence el tope, es porque GTK no
-    está dibujando esa ventana —no está mapeada—, y entonces no hay en pantalla ningún cuadro
-    espejado que la captura pueda tomar; se loguea con `tracing::warn!` y se sigue.
+  - `CameraPip::prepare_for_recording(&self) -> impl Future<Output = anyhow::Result<()>>`:
+    pone `mirrored = false` y espera una **barrera de presentación** (codex r3 #1): anota el
+    `frame_counter()` del `gdk::FrameClock` de la ventana del PiP en el momento del cambio,
+    pide cuadros con `frame_clock.request_phase(gdk::FrameClockPhase::PAINT)` en cada
+    `after-paint` hasta resolver (el reloj no pide cuadros solo: Gdk-4.0.gir, línea 11549), y
+    resuelve cuando `frame_clock.timings(n)` de un cuadro `n` posterior al cambio tiene
+    `is_complete()` y `presentation_time() > 0`, es decir, cuando el compositor informó que lo
+    presentó (`FrameTimings::presentation_time`, gdk4 0.11.2, `src/auto/frame_timings.rs`
+    línea 44). Si el compositor no informa tiempos de presentación (`presentation_time() == 0`
+    en cuadros completos), alcanza con el segundo cuadro completo posterior al cambio.
+  - La decisión vive en una máquina de estados pura, `PresentationBarrier`, que recibe
+    `(frame_counter, complete, presentation_time)` y contesta `Pending` o `Done`. **Tests
+    primero:** cuadros anteriores al cambio no la resuelven; un cuadro posterior completo pero
+    sin presentar tampoco; uno presentado sí; sin tiempos de presentación, el segundo cuadro
+    completo sí; un cuadro presentado que llega tarde (después de varios `Pending`) también.
+  - **Tope de 1 s.** Si vence con el PiP mapeado, `prepare_for_recording` devuelve `Err`, y el
+    gancho lo propaga: `start_inner` falla con el contexto «The camera overlay did not refresh
+    in time», la grabación no arranca y se muestra el diálogo de error. Es la alternativa que
+    pide la ronda 3: nunca se captura un cuadro sin haber confirmado el desespejado. Si el PiP
+    no está mapeado, devuelve `Ok` enseguida, porque no hay nada en pantalla.
   - **Cuándo se llama:** dentro de `Recording::start_inner`, **después** del portal y del
     selector de área y **antes** del `Timer` de la cuenta regresiva (o de poner el pipeline en
     `PLAYING` si no hay demora). Mientras espera el portal, el estado sigue en `Init` y el PiP
     sigue espejado, como pide la spec. `Recording` recibe el gancho con
-    `Recording::set_before_capture(f: Box<dyn Fn() -> LocalBoxFuture<'static, ()>>)`, que
+    `Recording::set_before_capture(f: Box<dyn Fn() -> LocalBoxFuture<'static, anyhow::Result<()>>>)`, que
     `Window::toggle_record` fija **después** de guardar la grabación en `imp.recording` (un
     segundo Ctrl+R en ese rato ve la grabación y la detiene, como hoy).
   - `CameraPip::set_recording_active(bool)`: lo llama la ventana con `false` en
@@ -1124,14 +1164,14 @@ esquinas redondeadas con una franja por fila de 2 px (fable r2 #10). Test: para 
   motivo (`NotCompiled` → «Kooha was built without gtk4-layer-shell.»;
   `CompositorUnsupported` → «Your desktop does not support screen overlays.»), y un botón
   «Open Report». Con el aviso, las filas del grupo quedan `sensitive = false`. El botón «Open
-  Report» se conecta en el chunk 6; hasta entonces queda oculto (P18 lo pide junto al reporte).
+  Report» se conecta en el chunk 6; hasta entonces queda oculto (P16 lo pide junto al reporte).
 - [ ] **Bandeja**: `TrayModel.camera_enabled` y `camera_available`; `TrayCommand::ToggleCamera`.
   **Test primero:** la `Check("Camera")` aparece antes de «Show Window», habilitada aun
   grabando, y deshabilitada si `camera_available` es `false`.
 
 ### Tarea 4.6 · Traducciones, verificación y commit
 
-- [ ] `es.po`: «Show Camera» → «Mostrar cámara», «Camera» → «Cámara», «Camera Source» →
+- [ ] `es.po`: «Camera Monitor» → «Monitor de la cámara», «Show Camera» → «Mostrar cámara», «Camera» → «Cámara», «Camera Source» →
   «Fuente de la cámara», «Camera Shape» → «Forma de la cámara», «Circle» → «Círculo»,
   «Rounded Rectangle» → «Rectángulo redondeado», «Right-click the camera to switch» →
   «Clic derecho sobre la cámara para cambiarla», «Camera & Overlays» → «Cámara y capas»,
@@ -1190,9 +1230,6 @@ pub struct BorderGeometry {
     pub sides: [bool; 4],
 }
 
-/// `stream_pixels` is the stream frame size; `stream_logical` is the stream's
-/// portal position and size in compositor logical coordinates; `monitor` is the
-/// monitor's logical geometry (x, y, w, h).
 /// Only for a stream that captures a whole monitor; `monitor` is that monitor's
 /// logical geometry (x, y, w, h) from `gdk::Monitor::geometry()`.
 pub fn border_geometry(crop: Crop, monitor: (i32, i32, i32, i32)) -> Option<BorderGeometry>;
@@ -1230,7 +1267,7 @@ no es finita o el área queda vacía.
 `src/application.rs`.
 
 - [ ] `AreaBorder`: ventana-capa con `overlay::init_overlay` en el monitor, anclada a los cuatro
-  bordes (`overlay::anchor_all_edges`), sin región de entrada (en `realize`,
+  bordes (`overlay::anchor_all_edges`), con `decorated = false`, sin región de entrada (en `realize`,
   `surface.set_input_region(Some(&cairo::Region::create()))` — la firma en gdk4 0.11.2 recibe
   `Option<&cairo::Region>`, `src/auto/surface.rs` línea 252 —, así el mouse la atraviesa; se
   comprueba en la etapa 8 haciendo click a través del borde), fondo
@@ -1314,7 +1351,7 @@ sistema real:
 | `cameras(count: usize)` | `camera_pip::devices::list().len()` | 0 → `Warning`, sin comando; impacto: el PiP |
 | `overlays(av: Result<(), OverlayUnavailable>)` | `overlay::availability()` | `NotCompiled` → `Failed`, `sudo apt install libgtk4-layer-shell-dev` y nota «Then rebuild Kooha.» (también sin display: F1); `CompositorUnsupported` → `Failed` sin comando, problema «Your desktop does not support screen overlays (wlr-layer-shell)»; `NoDisplay` → `Warning` «Could not ask the desktop without a display» |
 | `tray(watcher: bool, desktop: &str)` | `NameHasOwner("org.kde.StatusNotifierWatcher")` en el bus de sesión | `false` → `Failed`; en GNOME el comando es `sudo apt install gnome-shell-extension-appindicator` |
-| `recordings_folder(path, exists: bool, writable: bool)` | `settings.saving_location()`; escribir y borrar un archivo temporal | No existe → `Failed`, `mkdir -p -- <ruta escapada>`; no se puede escribir → `Failed`, `ls -ld -- <ruta escapada>` y nota de permisos. La ruta pasa por `shell_quote` (codex r1 #10) |
+| `recordings_folder(path, exists: bool, writable: bool)` | `settings.saving_location_unchecked()`, un getter nuevo que devuelve la ruta guardada o la de por defecto **sin** `create_dir_all` (el `saving_location()` de hoy la crea, `src/settings.rs` líneas 55–76); escribir y borrar un archivo temporal sólo si existe | No existe → `Failed`, `mkdir -p -- <ruta escapada>`; no se puede escribir → `Failed`, `ls -ld -- <ruta escapada>` y nota de permisos. La ruta pasa por `shell_quote` (codex r1 #10) |
 
 Paquetes por elemento (Ubuntu), verificados el 17/11/2026 con el registro de GStreamer y
 `dpkg -S` sobre el archivo de cada plugin (fable r2 #8):
@@ -1326,8 +1363,8 @@ Paquetes por elemento (Ubuntu), verificados el 17/11/2026 con el registro de GSt
 | `gstreamer1.0-plugins-base` | `videoconvert`, `videoscale`, `videorate`, `compositor`, `audioconvert`, `audioresample`, `audiomixer`, `audiorate`, `opusenc` |
 | `gstreamer1.0-plugins-good` | `pulsesrc`, `videocrop`, `videobalance`, `videoflip`, `v4l2src`, `vp8enc`, `vp9enc`, `webmmux`, `matroskamux`, `mp4mux`, `lamemp3enc`, `mpegaudioparse` |
 | `gstreamer1.0-plugins-ugly` | `x264enc` |
-| `gstreamer1.0-plugins-bad` | `h264parse`, `av1enc`, `vah264enc` (este último sin verificar: no está instalado) |
-| `gstreamer1.0-plugins-extra` | `vapostproc` |
+| `gstreamer1.0-plugins-bad` | `h264parse`, `av1enc` |
+| `gstreamer1.0-plugins-extra` | `vapostproc`, `vah264enc` (los dos salen de `libgstva.so`) |
 | Viene dentro de Kooha | `gifenc`, `gtk4paintablesink` (los registra `src/main.rs` de forma estática) |
 
 Un elemento que no está en la tabla da el problema «Unknown package for <elemento>» sin
@@ -1381,8 +1418,9 @@ pipeline, y falla si alguno cae fuera de la tabla.
   `doctor::run` con
   `glib::MainContext::default().block_on`, imprimir `to_text()` por `stdout` y salir con 0 o 1
   según `has_failures()`. Agregar `#[allow(clippy::print_stdout)]` local, porque `main.rs`
-  lo prohíbe a nivel de crate. Prueba (criterio F2), con el binario del worktree y sin
-  display: `env -u WAYLAND_DISPLAY -u DISPLAY GSETTINGS_SCHEMA_DIR=<worktree>/_install/share/glib-2.0/schemas GSETTINGS_BACKEND=memory <worktree>/_install/bin/kooha --check`
+  lo prohíbe a nivel de crate. Prueba (criterio F2), con el ejecutor aislado y sin display
+  (codex r3 #2, fable r3 #2):
+  `env -u WAYLAND_DISPLAY -u DISPLAY /home/sebas/robotin/apps/kooha/.workspace/t-1088-first-improvements/run-dev.sh <worktree> --check`
   imprime el reporte, no abre ventanas, y el chequeo «Screen overlays» sale `[FAIL]` compilado
   sin el feature y `[WARN]` con el feature. Las dos variantes se compilan y se prueban.
 - [ ] La ayuda de `--check` en `--help`: si `GApplication` rechaza la opción desconocida,

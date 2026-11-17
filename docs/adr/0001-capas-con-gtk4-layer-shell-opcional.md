@@ -1,6 +1,6 @@
 # ADR 0001 · Capas sobre la pantalla con gtk4-layer-shell, opcional
 
-**Estado:** aceptada (17/11/2026, grill P18 `layer-shell-dep`).
+**Estado:** aceptada (17/11/2026, grill P16 `layer-shell-dep`).
 
 ## Contexto
 
