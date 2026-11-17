@@ -168,7 +168,7 @@ Criterios:
 
 | Chequeo | Falla si |
 |---|---|
-| Elementos de GStreamer | Falta `pipewiresrc`, `pulsesrc`, `videoconvert`, `videoscale`, `videocrop`, `videobalance`, o un codificador o muxer de los perfiles |
+| Elementos de GStreamer | Falta `pipewiresrc`, `pulsesrc`, `videoconvert`, `videoscale`, `videocrop`, `videobalance`, o un codificador o muxer de los perfiles no experimentales (o del perfil activo, aunque sea experimental). Nombra cada elemento que falta |
 | Portal de captura | `org.freedesktop.portal.ScreenCast` no responde. Informa versión y modos de puntero |
 | PipeWire | No hay socket de PipeWire. Informa la versión |
 | Audio | No hay salida por defecto (para el audio del escritorio) o micrófono por defecto |
