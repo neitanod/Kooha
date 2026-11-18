@@ -7,7 +7,8 @@ use std::{
     fs, io,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
-    time::SystemTime,
+    thread,
+    time::{Duration, SystemTime},
 };
 
 use gtk::glib::{self, closure_local, prelude::*, subclass::prelude::*};
@@ -47,13 +48,20 @@ impl FileStamp {
     }
 }
 
+/// How many times a busy lock is tried, and how far apart, before giving
+/// up: the owners hold it for milliseconds, and the first try happens in
+/// the GTK thread while Kooha starts.
+const LOCK_ATTEMPTS: u32 = 10;
+const LOCK_RETRY: Duration = Duration::from_millis(50);
+
 /// An exclusive `flock` on `rectangles.json.lock`, released on drop. The
 /// file itself can't hold the lock: every save renames a new one into place.
 struct FileLock(fs::File);
 
 impl FileLock {
-    /// Waits until no other Kooha holds the lock of the areas file at
-    /// `path`, and takes it.
+    /// Takes the lock of the areas file at `path`, waiting for another
+    /// Kooha to let it go for `LOCK_ATTEMPTS` tries `LOCK_RETRY` apart at
+    /// most (fable code r3 #4).
     fn acquire(path: &Path) -> io::Result<Self> {
         let lock_path = lock_path(path);
         if let Some(parent) = lock_path.parent() {
@@ -64,16 +72,26 @@ impl FileLock {
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
-        loop {
+        for attempt in 1..=LOCK_ATTEMPTS {
             // SAFETY: the descriptor is open for as long as `file` lives.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 return Ok(Self(file));
             }
             let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
+            if !matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
                 return Err(err);
             }
+            if attempt < LOCK_ATTEMPTS {
+                thread::sleep(LOCK_RETRY);
+            }
         }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "another Kooha holds the lock of the file",
+        ))
     }
 }
 
@@ -112,8 +130,10 @@ mod imp {
         pub(super) file: RefCell<AreasFile>,
         /// The version of the file last read or written.
         pub(super) stamp: Cell<Option<FileStamp>>,
-        /// Never write the file: it is newer, or broken and impossible to
-        /// move aside.
+        /// Never write the file nor read it again: it is newer, broken and
+        /// impossible to move aside, or its lock couldn't be taken. Changes
+        /// stay in memory for the rest of the session, as a reload would
+        /// drop them (codex code r3 #1).
         pub(super) read_only: Cell<bool>,
         pub(super) load_notice: RefCell<Option<LoadError>>,
     }
@@ -165,7 +185,10 @@ impl AreaStore {
         // here (codex code r2 #1).
         let lock = FileLock::acquire(&path)
             .inspect_err(|err| {
-                tracing::warn!("Loading the areas without the lock of the file: {}", err);
+                tracing::warn!(
+                    "Loading the areas read-only, without the lock of the file: {}",
+                    err
+                );
             })
             .ok();
         match file::load(&path) {
@@ -175,10 +198,7 @@ impl AreaStore {
                 if let Some(hook) = AFTER_INITIAL_LOAD.with_borrow_mut(Option::take) {
                     hook();
                 }
-                // Without the lock, no stamp: the first change reads the
-                // file again.
-                imp.stamp
-                    .set(lock.as_ref().and_then(|_| FileStamp::of(&path)));
+                imp.stamp.set(FileStamp::of(&path));
             }
             Err(err) => {
                 tracing::warn!("Starting with no areas: {}", err);
@@ -187,6 +207,9 @@ impl AreaStore {
                 imp.read_only.set(!matches!(err, LoadError::Broken { .. }));
                 imp.load_notice.replace(Some(err));
             }
+        }
+        if lock.is_none() {
+            imp.read_only.set(true);
         }
         drop(lock);
 
@@ -378,6 +401,9 @@ impl AreaStore {
         op: impl FnOnce(&mut AreasFile) -> Result<bool, NameTaken>,
     ) -> Result<(), NameTaken> {
         let lock = self.lock();
+        if lock.is_err() {
+            self.imp().read_only.set(true);
+        }
         let reloaded = lock.is_ok() && self.reload_if_changed();
 
         let result = op(&mut self.imp().file.borrow_mut());
@@ -398,8 +424,8 @@ impl AreaStore {
 
     /// The lock of the file, or `None` if the file is never written. If
     /// the lock can't be taken, the message for the user: the change stays
-    /// in memory, as writing without the lock could lose another Kooha's
-    /// (codex code r2 #1).
+    /// in memory and the store becomes read-only, as writing without the
+    /// lock could lose another Kooha's (codex code r2 #1).
     fn lock(&self) -> Result<Option<FileLock>, String> {
         if self.imp().read_only.get() {
             return Ok(None);
@@ -877,8 +903,9 @@ mod tests {
                     .unwrap();
                 let _ = saved.send(());
             })));
-            // Long enough for it to save, unless the load holds the lock.
-            let _ = has_saved.recv_timeout(Duration::from_millis(500));
+            // Long enough for it to save, unless the load holds the lock;
+            // shorter than the time it tries the lock before giving up.
+            let _ = has_saved.recv_timeout(Duration::from_millis(200));
         })));
         let store = AreaStore::with_path(path.clone());
         writer.take().unwrap().join().unwrap();
@@ -912,6 +939,109 @@ mod tests {
         assert_eq!(count.get(), 1);
         assert_eq!(failed.borrow().len(), 1);
         assert!(!path.exists());
+    }
+
+    /// A file with "Old" saved, and its lock file left by that save.
+    fn file_with_old(dir: &TempDir) -> PathBuf {
+        let path = dir.file();
+        AreaStore::with_path(path.clone())
+            .save_named("Old", area(1), false)
+            .unwrap();
+        path
+    }
+
+    /// Makes the lock of `path` impossible to open, until the returned
+    /// guard makes it possible again.
+    fn break_lock(path: &Path) -> impl Drop {
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                fs::remove_dir(&self.0).unwrap();
+            }
+        }
+        let lock = lock_path(path);
+        let _ = fs::remove_file(&lock);
+        fs::create_dir(&lock).unwrap();
+        Restore(lock)
+    }
+
+    #[test]
+    fn a_change_without_the_lock_at_start_survives_the_lock_coming_back() {
+        let dir = TempDir::new();
+        let path = file_with_old(&dir);
+        let on_disk = fs::read_to_string(&path).unwrap();
+
+        let broken = break_lock(&path);
+        let store = AreaStore::with_path(path.clone());
+        let failed = failures(&store);
+        store.save_named("Demo", area(2), false).unwrap();
+        assert_eq!(failed.borrow().len(), 1);
+        drop(broken);
+
+        store.select(named("Demo"));
+
+        assert!(store.is_read_only());
+        assert_eq!(names(&store), ["Old", "Demo"]);
+        assert_eq!(store.selected(), named("Demo"));
+        assert_eq!(failed.borrow().len(), 2);
+        assert_eq!(fs::read_to_string(&path).unwrap(), on_disk);
+    }
+
+    #[test]
+    fn a_change_without_the_lock_in_a_save_survives_the_lock_coming_back() {
+        let dir = TempDir::new();
+        let path = file_with_old(&dir);
+        let on_disk = fs::read_to_string(&path).unwrap();
+        let store = AreaStore::with_path(path.clone());
+        let failed = failures(&store);
+
+        let broken = break_lock(&path);
+        store.save_named("Demo", area(2), false).unwrap();
+        assert_eq!(failed.borrow().len(), 1);
+        drop(broken);
+
+        store.select(named("Demo"));
+
+        assert!(store.is_read_only());
+        assert_eq!(names(&store), ["Old", "Demo"]);
+        assert_eq!(store.selected(), named("Demo"));
+        assert_eq!(failed.borrow().len(), 2);
+        assert_eq!(fs::read_to_string(&path).unwrap(), on_disk);
+    }
+
+    #[test]
+    fn the_wait_for_a_busy_lock_is_bounded() {
+        use std::{
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        let dir = TempDir::new();
+        let path = file_with_old(&dir);
+        // Another Kooha holds the lock and doesn't let it go.
+        let held = FileLock::acquire(&path).unwrap();
+
+        let (done, has_done) = mpsc::channel();
+        let store_path = path.clone();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let store = AreaStore::with_path(store_path);
+            let _ = done.send((start.elapsed(), store.is_read_only(), names(&store)));
+        });
+        let (waited, read_only, loaded) = has_done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("The store waited for the lock without a limit");
+        drop(held);
+
+        let expected = LOCK_RETRY * (LOCK_ATTEMPTS - 1);
+        assert!(waited >= expected, "Gave up after {waited:?}");
+        assert!(
+            waited < expected + Duration::from_millis(400),
+            "Waited {waited:?}"
+        );
+        assert!(read_only);
+        assert_eq!(loaded, ["Old"]);
     }
 
     #[test]
