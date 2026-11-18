@@ -71,6 +71,52 @@ with `KOOHA_EXPERIMENTAL` env var set to `all` (e.g., `KOOHA_EXPERIMENTAL=all fl
 | `multiple-video-sources` | Enables recording multiple monitor or windows                           | Stability and performance |
 | `window-recording`       | Enables recording a specific window                                     | Flickering                |
 
+## 📐 Saved areas
+
+In Selection mode, on a compositor with `wlr-layer-shell` (e.g., KDE Plasma) and
+with Kooha built with `--features layer-shell`, you mark the area to record
+directly on the screen:
+
+* Click **Mark Area**, choose **Mark New Area…** in the tray menu, or press
+  Record with no area chosen. Drag to mark, type an exact size if you need one,
+  then press Enter to confirm or Esc to cancel.
+* Give the area a name to save it, or leave the name empty to keep it as the
+  last area. Pick an area from the drop-down next to **Mark Area** or from the
+  tray menu's **Area** submenu.
+* **Areas…** lists the saved areas: choose, rename, mark again or delete them.
+* A dashed border outlines the chosen area on the screen. **Show Area Border**
+  turns it on and off (<kbd>Ctrl</kbd>+<kbd>B</kbd>).
+
+An area belongs to a monitor. If the monitor is disconnected or its size or
+scale changes, the area is out of date and Kooha asks you to mark it again. When
+you record, share that monitor (whole screen) in the sharing dialog.
+
+The areas live in `rectangles.json`, in Kooha's config directory
+(`~/.config/kooha/rectangles.json`, following `XDG_CONFIG_HOME`). It is plain
+JSON, so you can back it up or copy it to another machine. If it can't be read,
+Kooha moves it aside to `rectangles.json.broken-<date>` and starts with an
+empty list.
+
+Without layer-shell (e.g., on X11), Selection mode keeps the regular area
+selector.
+
+## 🎞️ Video encoder
+
+For MP4 and Matroska, **Preferences → Encoder** chooses the H.264 encoder:
+
+| Option    | GStreamer element                  |
+| --------- | ---------------------------------- |
+| Automatic | The first one that works, in order |
+| Intel     | `vah264lpenc` (VA-API)             |
+| NVIDIA    | `nvh264enc`                        |
+| CPU       | `x264enc`                          |
+
+Before the first recording, Kooha tests each encoder with a short pipeline.
+Automatic uses the first one that passes, trying Intel, then NVIDIA, then the
+CPU. An encoder whose element is not installed is shown disabled with the
+reason. The **Hardware Video Encoders** check in the requirements report lists
+the encoders that don't work.
+
 ## 📋 Runtime Requirements
 
 * pipewire
