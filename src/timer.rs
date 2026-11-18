@@ -137,6 +137,13 @@ impl Future for Timer {
         let waker = cx.waker().clone();
         self.inner.waker.replace(Some(waker));
 
+        // Already counting down: a later poll only refreshes the waker.
+        // Starting again would orphan the running sources, which would keep
+        // reporting the seconds left after the timer ends.
+        if self.inner.source_id.borrow().is_some() {
+            return Poll::Pending;
+        }
+
         self.inner
             .secs_left_changed_source_id
             .replace(Some(glib::timeout_add_local(
@@ -218,6 +225,32 @@ mod tests {
         assert!(timer.clone().await.is_err());
         assert!(matches!(timer.inner.state.get(), State::Cancelled));
         assert_eq!(timer.inner.secs_left(), 0);
+    }
+
+    /// A second poll before the timer ends (a spurious wake-up of the task
+    /// that awaits it) must not start a second countdown: its leftover
+    /// sources kept reporting "0 seconds left" after the recording started,
+    /// and panicked once the timer was gone.
+    #[gtk::test]
+    async fn polled_twice_counts_down_once() {
+        let calls = Rc::new(Cell::new(0));
+        let mut timer = Timer::new(Duration::from_millis(500), {
+            let calls = Rc::clone(&calls);
+            move |_| calls.set(calls.get() + 1)
+        });
+
+        assert!(futures_util::poll!(&mut timer).is_pending());
+        assert!(futures_util::poll!(&mut timer).is_pending());
+        assert!((&mut timer).await.is_ok());
+
+        let calls_when_done = calls.get();
+        glib::timeout_future(SECS_LEFT_UPDATE_INTERVAL * 4).await;
+        assert_eq!(calls.get(), calls_when_done);
+
+        // With the timer gone, a leftover source would panic on upgrade.
+        drop(timer);
+        glib::timeout_future(SECS_LEFT_UPDATE_INTERVAL * 4).await;
+        assert_eq!(calls.get(), calls_when_done);
     }
 
     #[gtk::test]
