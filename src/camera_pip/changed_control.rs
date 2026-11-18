@@ -262,10 +262,6 @@ mod tests {
         }
     }
 
-    fn ok() -> io::Result<()> {
-        Ok(())
-    }
-
     /// A setter that records its calls and answers `answer`.
     fn recording_setter(
         calls: &RefCell<Vec<(PathBuf, i32)>>,
@@ -301,13 +297,13 @@ mod tests {
         let held = change(
             path,
             control("/dev/video0", 1),
-            recording_setter(&calls, ok),
+            recording_setter(&calls, || Ok(())),
         )
         .unwrap();
         assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video0"), 0)]);
         assert_eq!(load(path), Some(control("/dev/video0", 1)));
 
-        write_back(path, held, recording_setter(&calls, ok));
+        write_back(path, held, recording_setter(&calls, || Ok(())));
         assert_eq!(calls.borrow()[1], (PathBuf::from("/dev/video0"), 1));
         assert!(!path.exists());
     }
@@ -335,7 +331,7 @@ mod tests {
         let held = change(
             path,
             control("/dev/video0", 1),
-            recording_setter(&calls, ok),
+            recording_setter(&calls, || Ok(())),
         )
         .unwrap();
 
@@ -366,22 +362,31 @@ mod tests {
         let state = TempState::new("live-owner");
         let path = &state.path;
         let calls = RefCell::new(Vec::new());
-        let held = change(path, control("/dev/video0", 1), recording_setter(&calls, ok)).unwrap();
+        let held = change(
+            path,
+            control("/dev/video0", 1),
+            recording_setter(&calls, || Ok(())),
+        )
+        .unwrap();
 
         // A second Kooha starts while the first one records with the
         // camera on (codex code r2 #3).
         let other_calls = RefCell::new(Vec::new());
-        restore_leftover(path, recording_setter(&other_calls, ok));
+        restore_leftover(path, recording_setter(&other_calls, || Ok(())));
         assert!(other_calls.borrow().is_empty());
         assert_eq!(load(path), Some(control("/dev/video0", 1)));
 
         // Nor does it change the control under the first one.
-        let other = change(path, control("/dev/video0", 0), recording_setter(&other_calls, ok));
+        let other = change(
+            path,
+            control("/dev/video0", 0),
+            recording_setter(&other_calls, || Ok(())),
+        );
         assert!(other.is_none());
         assert!(other_calls.borrow().is_empty());
         assert_eq!(load(path), Some(control("/dev/video0", 1)));
 
-        write_back(path, held, recording_setter(&calls, ok));
+        write_back(path, held, recording_setter(&calls, || Ok(())));
         assert_eq!(calls.borrow()[1], (PathBuf::from("/dev/video0"), 1));
         assert!(!path.exists());
     }
@@ -395,7 +400,7 @@ mod tests {
         drop(held);
 
         let calls = RefCell::new(Vec::new());
-        restore_leftover(path, recording_setter(&calls, ok));
+        restore_leftover(path, recording_setter(&calls, || Ok(())));
 
         assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video0"), 1)]);
         assert!(!path.exists());
@@ -432,7 +437,7 @@ mod tests {
             ("not-a-video-node", r#"{"node": "/dev/sda", "value": 1}"#),
         ] {
             let state = TempState::new(name);
-        let path = &state.path;
+            let path = &state.path;
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, contents).unwrap();
             let calls = RefCell::new(Vec::new());

@@ -114,13 +114,9 @@ impl H264Encoder {
     /// encoder and size, except a timeout, and an encoder never runs two
     /// probes at once.
     pub async fn works(self, size: (i32, i32)) -> Result<(), String> {
-        static CACHE: LazyLock<ProbeCache<H264Encoder, (i32, i32)>> =
-            LazyLock::new(Mutex::default);
+        static CACHE: LazyLock<ProbeCache<H264Encoder, (i32, i32)>> = LazyLock::new(Mutex::default);
 
-        let result = cached(&CACHE, self, size, PROBE_TIMEOUT, move || {
-            self.probe(size)
-        })
-        .await;
+        let result = cached(&CACHE, self, size, PROBE_TIMEOUT, move || self.probe(size)).await;
         match &result {
             Ok(()) => tracing::info!(encoder = ?self, ?size, "The H.264 encoder works"),
             Err(reason) => {
@@ -292,7 +288,7 @@ where
                             panic::catch_unwind(AssertUnwindSafe(probe)).unwrap_or_else(|_| {
                                 Err(ProbeError::Failed("The probe panicked".to_string()))
                             });
-                        finish(cache, thread_encoder, next_id, thread_size, result);
+                        finish(cache, thread_encoder, next_id, &thread_size, result);
                     });
                 if let Err(err) = spawned {
                     // No thread finishes this entry.
@@ -330,7 +326,7 @@ fn finish<E: Eq + Hash, S: Eq + Hash + Clone>(
     cache: &ProbeCache<E, S>,
     encoder: E,
     id: u64,
-    size: S,
+    size: &S,
     result: Result<(), ProbeError>,
 ) {
     let timed_out = result == Err(ProbeError::TimedOut);
@@ -348,7 +344,9 @@ fn finish<E: Eq + Hash, S: Eq + Hash + Clone>(
         }
     };
     if !timed_out {
-        probes.results.insert((encoder, size.clone()), result.clone());
+        probes
+            .results
+            .insert((encoder, size.clone()), result.clone());
     }
     drop(probes);
 
@@ -575,7 +573,13 @@ mod tests {
         let (release, released) = mpsc::channel();
         let released = Arc::new(Mutex::new(released));
 
-        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, elapsed) = timed(cached(
+            cache,
+            "key",
+            0,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         assert!(result.unwrap_err().contains("did not answer"));
         assert!(elapsed >= TIMEOUT, "{elapsed:?}");
         assert!(elapsed < TIMEOUT * 5, "{elapsed:?}");
@@ -584,8 +588,13 @@ mod tests {
         // for the stuck thread nor launch another (fable code r2 #5, codex
         // code r2 #2).
         for size in [0, 1, 0] {
-            let (result, elapsed) =
-                timed(cached(cache, "key", size, TIMEOUT, stuck_probe(&runs, &released)));
+            let (result, elapsed) = timed(cached(
+                cache,
+                "key",
+                size,
+                TIMEOUT,
+                stuck_probe(&runs, &released),
+            ));
             assert!(result.unwrap_err().contains("did not answer"));
             assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
         }
@@ -600,14 +609,26 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(2));
             std::thread::sleep(Duration::from_millis(10));
         }
-        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, elapsed) = timed(cached(
+            cache,
+            "key",
+            0,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         assert_eq!(result, Ok(()));
         assert!(elapsed < TIMEOUT, "{elapsed:?}");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
 
         // And another size is probed again.
         release.send(Ok(())).unwrap();
-        let (result, _) = timed(cached(cache, "key", 1, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, _) = timed(cached(
+            cache,
+            "key",
+            1,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         assert_eq!(result, Ok(()));
         assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
@@ -642,7 +663,13 @@ mod tests {
                 .send(Err(ProbeError::Failed("no device".to_string())))
                 .unwrap();
         });
-        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, elapsed) = timed(cached(
+            cache,
+            "key",
+            0,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         sender.join().unwrap();
 
         assert_eq!(result, Err("no device".to_string()));
@@ -700,7 +727,13 @@ mod tests {
         let (release, released) = mpsc::channel();
         let released = Arc::new(Mutex::new(released));
 
-        let (result, _) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, _) = timed(cached(
+            cache,
+            "key",
+            0,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         assert!(result.unwrap_err().contains("did not answer"));
         release.send(Err(ProbeError::TimedOut)).unwrap();
         let start = Instant::now();
@@ -710,7 +743,13 @@ mod tests {
         }
 
         release.send(Ok(())).unwrap();
-        let (result, _) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, _) = timed(cached(
+            cache,
+            "key",
+            0,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
         assert_eq!(result, Ok(()));
         assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
@@ -834,10 +873,7 @@ mod tests {
                 .filter(|part| !part.starts_with("video/"))
                 .collect::<Vec<_>>();
             assert_eq!(elements, encoder.required_elements(), "{encoder:?}");
-            assert!(
-                elements.contains(&encoder.encoder_element()),
-                "{encoder:?}"
-            );
+            assert!(elements.contains(&encoder.encoder_element()), "{encoder:?}");
         }
     }
 }

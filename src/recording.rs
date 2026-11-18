@@ -1361,7 +1361,9 @@ mod tests {
         // pipeline: the selector, `videorate` or the audio mixer (fable code
         // r2 #3).
         assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("capsfilter"))).is_none());
-        assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("videoconvert"))).is_none());
+        assert!(
+            encoder_error_help(Some(H264Encoder::Cpu), Some(&element("videoconvert"))).is_none()
+        );
         assert!(
             encoder_error_help(Some(H264Encoder::Intel), Some(&element("videoconvert"))).is_none()
         );
