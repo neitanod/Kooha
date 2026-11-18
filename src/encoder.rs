@@ -88,6 +88,15 @@ impl H264Encoder {
         }
     }
 
+    /// The factory name of the element of `chain` that encodes.
+    pub fn encoder_element(self) -> &'static str {
+        match self {
+            Self::Intel => "vah264lpenc",
+            Self::Nvidia => "nvh264enc",
+            Self::Cpu => "x264enc",
+        }
+    }
+
     /// The first element of `chain` that is not in the `GStreamer` registry.
     pub fn missing_element(self) -> Option<&'static str> {
         self.required_elements()
@@ -825,6 +834,10 @@ mod tests {
                 .filter(|part| !part.starts_with("video/"))
                 .collect::<Vec<_>>();
             assert_eq!(elements, encoder.required_elements(), "{encoder:?}");
+            assert!(
+                elements.contains(&encoder.encoder_element()),
+                "{encoder:?}"
+            );
         }
     }
 }

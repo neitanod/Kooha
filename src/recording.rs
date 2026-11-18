@@ -147,19 +147,19 @@ fn encoder_help(encoder: H264Encoder) -> ContextWithHelp {
 }
 
 /// The help for an error of the recording's pipeline posted by `src`, when
-/// `src` is an element of the chain of `encoder`, the pipeline's encoder.
-/// The probe runs at a fixed size for whole streams, so an encoder can still
-/// fail with the size of the real frames.
+/// `src` is the element that encodes with `encoder`, the pipeline's
+/// encoder. The probe runs at a fixed size for whole streams, so an encoder
+/// can still fail with the size of the real frames.
+///
+/// The converters and caps filters of the chain are left out: the pipeline
+/// has others, whose errors are not the encoder's (fable code r2 #3).
 fn encoder_error_help(
     encoder: Option<H264Encoder>,
     src: Option<&gst::Object>,
 ) -> Option<ContextWithHelp> {
     let encoder = encoder?;
     let factory = src?.downcast_ref::<gst::Element>()?.factory()?;
-    encoder
-        .required_elements()
-        .contains(&factory.name().as_str())
-        .then(|| encoder_help(encoder))
+    (factory.name() == encoder.encoder_element()).then(|| encoder_help(encoder))
 }
 
 /// Whether recording in `mode` has to mark an area first: in Selection mode
@@ -1357,6 +1357,14 @@ mod tests {
         // Not an element of the chosen encoder's chain.
         assert!(encoder_error_help(Some(H264Encoder::Intel), Some(&element("x264enc"))).is_none());
         assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("filesink"))).is_none());
+        // A converter or a caps filter of the chain, also elsewhere in the
+        // pipeline: the selector, `videorate` or the audio mixer (fable code
+        // r2 #3).
+        assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("capsfilter"))).is_none());
+        assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("videoconvert"))).is_none());
+        assert!(
+            encoder_error_help(Some(H264Encoder::Intel), Some(&element("videoconvert"))).is_none()
+        );
         // A profile with no H.264 encoder, or no source.
         assert!(encoder_error_help(None, Some(&element("x264enc"))).is_none());
         assert!(encoder_error_help(Some(H264Encoder::Cpu), None).is_none());
