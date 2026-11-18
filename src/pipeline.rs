@@ -22,6 +22,9 @@ use crate::{
 
 const AUDIO_SAMPLE_RATE: i32 = 48_000;
 
+/// The most raw video the queue before the encoder holds.
+const VIDEOENC_QUEUE_MAX_BYTES: u32 = 256 * 1024 * 1024;
+
 #[derive(Debug)]
 #[must_use]
 pub struct PipelineBuilder {
@@ -273,10 +276,12 @@ pub fn link_gated_queue(
         .name(queue_name)
         .build()?;
     if branch == GatedBranch::Video {
-        // Room for a burst in the encoder without stalling the capture.
+        // Room for a burst in the encoder without stalling the capture. The
+        // byte cap bounds the memory of whole-monitor frames: 30 BGRx frames
+        // of 2560x1600 are about 490 MB.
         queue.set_property("max-size-buffers", 30_u32);
         queue.set_property("max-size-time", 0_u64);
-        queue.set_property("max-size-bytes", 0_u32);
+        queue.set_property("max-size-bytes", VIDEOENC_QUEUE_MAX_BYTES);
     }
     pipeline.add_many([&identity, &queue])?;
     src.link(&identity)?;
@@ -1270,11 +1275,11 @@ mod test {
     }
 
     #[test]
-    fn videoenc_queue_holds_thirty_buffers() {
+    fn videoenc_queue_holds_thirty_buffers_up_to_256_mib() {
         let pipeline = built_pipeline(|_| {});
 
         let queue = pipeline.by_name("kooha-videoenc-queue").unwrap();
-        assert_eq!(queue_limits(&queue), (30, 0, 0));
+        assert_eq!(queue_limits(&queue), (30, 0, 256 * 1024 * 1024));
         assert_eq!(leaky_nick(&queue), "no");
     }
 
