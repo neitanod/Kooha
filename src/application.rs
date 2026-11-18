@@ -213,6 +213,14 @@ impl Application {
         self.send_notification(Some("record-success"), &notification);
     }
 
+    /// A notice of the recording, like «Choose DP-3 (whole screen) in the
+    /// sharing dialog», as a desktop notification: the sharing dialog may
+    /// cover the window, or the window be minimized.
+    pub fn send_recording_notice_notification(&self, message: &str) {
+        let notification = gio::Notification::new(message);
+        self.send_notification(Some("recording-notice"), &notification);
+    }
+
     pub fn send_capture_warnings_notification(&self, warnings: CaptureWarnings) {
         if warnings.is_empty() {
             return;
@@ -338,6 +346,15 @@ impl Application {
 
         match command {
             TrayCommand::ToggleRecord => {
+                if tray_record_presents_window(
+                    self.has_recording(),
+                    self.settings().capture_mode(),
+                    overlay::availability().is_ok(),
+                ) {
+                    // The marking and the notices go on the window, which
+                    // may be minimized (codex code r1 #7, fable code r1 #8).
+                    self.present_window(activation_token.as_deref());
+                }
                 if let Err(err) =
                     WidgetExt::activate_action(&self.window(), "win.toggle-record", None)
                 {
@@ -565,6 +582,17 @@ fn tray_model(
         areas: areas.unwrap_or_default(),
         show_area_border: settings.show_area_border(),
     }
+}
+
+/// Whether «Start Recording» in the tray brings the window first: when it
+/// starts a recording in Selection mode with layers, which may mark an
+/// area or tell which monitor to share, on the window.
+fn tray_record_presents_window(
+    has_recording: bool,
+    mode: CaptureMode,
+    overlays_available: bool,
+) -> bool {
+    !has_recording && mode == CaptureMode::Selection && overlays_available
 }
 
 /// Whether the window's recording `snapshot` is past idle: from the portal
@@ -808,6 +836,19 @@ mod tests {
         assert_eq!(Application::get().area_store().last(), Some(area()));
 
         settings.reset("capture-mode");
+    }
+
+    #[test]
+    fn tray_record_presents_the_window_for_a_selection() {
+        use CaptureMode::{MonitorWindow, Selection};
+
+        // Starting in Selection mode may mark an area or tell which monitor
+        // to choose, on the window.
+        assert!(tray_record_presents_window(false, Selection, true));
+        // Stopping, the upstream selector or a whole monitor show nothing.
+        assert!(!tray_record_presents_window(true, Selection, true));
+        assert!(!tray_record_presents_window(false, Selection, false));
+        assert!(!tray_record_presents_window(false, MonitorWindow, true));
     }
 
     #[gtk::test]

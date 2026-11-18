@@ -709,7 +709,9 @@ impl Window {
                 #[weak(rename_to = obj)]
                 self,
                 move |_, message| {
-                    obj.add_toast(adw::Toast::new(message));
+                    obj.show_recording_notice(message, &|message| {
+                        Application::get().send_recording_notice_notification(message);
+                    });
                 }
             )),
         ];
@@ -738,6 +740,14 @@ impl Window {
         recording
             .start(Some(self), Application::get().settings())
             .await;
+    }
+
+    /// Shows a notice of the recording as a toast, and through `notify`,
+    /// the desktop notification: the toast alone goes unseen with the window
+    /// minimized (codex code r1 #7).
+    fn show_recording_notice(&self, message: &str, notify: &dyn Fn(&str)) {
+        self.add_toast(adw::Toast::new(message));
+        notify(message);
     }
 
     fn toggle_pause(&self) -> Result<()> {
@@ -771,6 +781,7 @@ impl Window {
 
         let app = Application::get();
         app.withdraw_notification("capture-warnings");
+        app.withdraw_notification("recording-notice");
         if let Some(camera_pip) = app.camera_pip() {
             camera_pip.set_recording_active(false);
         }
@@ -1918,6 +1929,22 @@ mod tests {
         assert_eq!(
             missing_area_notice("Demo"),
             "The area “Demo” is gone; the new one is the last area"
+        );
+    }
+
+    #[gtk::test]
+    fn a_recording_notice_is_also_a_desktop_notification() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let sent = RefCell::new(Vec::new());
+
+        window.show_recording_notice("Choose DP-3 (whole screen) in the sharing dialog", &|message| {
+            sent.borrow_mut().push(message.to_string());
+        });
+
+        assert_eq!(
+            *sent.borrow(),
+            ["Choose DP-3 (whole screen) in the sharing dialog"]
         );
     }
 
