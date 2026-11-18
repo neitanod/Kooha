@@ -21,7 +21,7 @@ use std::{
 use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
     Application,
-    area_border::AreaBorder,
+    area_border::{self, AreaBorder, geometry::BorderGeometry},
     area_marker::{
         self,
         save_dialog::{self, SaveChoice},
@@ -59,6 +59,15 @@ pub type Marker =
 
 #[derive(Default)]
 struct MarkerHook(Option<Marker>);
+
+/// The area border on screen, with what it was built from.
+#[derive(Debug)]
+struct ShownBorder {
+    // Dropping it destroys the layer.
+    _layer: AreaBorder,
+    geometry: BorderGeometry,
+    connector: Option<String>,
+}
 
 impl fmt::Debug for MarkerHook {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,8 +129,9 @@ mod imp {
         pub(super) recording: RefCell<Option<(Recording, Vec<glib::SignalHandlerId>)>>,
         /// The last whole second of the recording duration sent to the tray.
         pub(super) tray_duration_secs: Cell<u64>,
-        /// The border of the recorded area, while it is on screen.
-        pub(super) area_border: RefCell<Option<AreaBorder>>,
+        /// The border of the chosen or the recorded area, while it is on
+        /// screen.
+        pub(super) area_border: RefCell<Option<ShownBorder>>,
         /// What each entry of the areas dropdown chooses.
         pub(super) area_items: RefCell<Vec<areas::Selected>>,
         /// The dropdown is being refilled: its selection is not the user's.
@@ -818,7 +828,7 @@ impl Window {
 
         self.update_warnings_boxes();
         self.update_tray();
-        self.update_area_border(state);
+        self.update_area_border();
 
         self.update_actions();
         self.action_set_enabled(
@@ -834,39 +844,66 @@ impl Window {
         );
     }
 
-    /// Shows the border of the recorded area during the countdown, the
-    /// recording and the pause (P14), once per recording; removes it in any
-    /// other state.
-    fn update_area_border(&self, state: RecordingState) {
+    /// Shows the border of the chosen area before recording (P8), and of
+    /// the recorded area during the countdown, the recording and the pause
+    /// (P14); removes it otherwise. The same border on the same monitor
+    /// stays on screen, from the chosen area to the recording.
+    fn update_area_border(&self) {
         let imp = self.imp();
+        let app = Application::get();
+        let settings = app.settings();
 
-        if !shows_area_border(state) {
-            // Dropping it destroys the layer.
+        let monitors = current_monitors();
+        let fresh_area = app
+            .area_store()
+            .selected_area()
+            .filter(|chosen| chosen.area.staleness(&monitors).is_none());
+        let source = area_row::border_source(
+            self.recording_state(),
+            settings.capture_mode() == CaptureMode::Selection,
+            settings.show_area_border(),
+            fresh_area.is_some(),
+            overlay::availability().is_ok(),
+        );
+
+        let wanted = match source {
+            area_row::BorderSource::None => None,
+            area_row::BorderSource::Recording => imp
+                .recording
+                .borrow()
+                .as_ref()
+                .and_then(|(recording, _)| recording.area_border()),
+            area_row::BorderSource::Idle => {
+                fresh_area.and_then(|chosen| area_border::for_area(&chosen.area, &monitors))
+            }
+        };
+        let Some((geometry, monitor)) = wanted else {
             imp.area_border.take();
-            return;
-        }
-
-        if imp.area_border.borrow().is_some() {
-            return;
-        }
-
-        let Some((border, monitor)) = imp
-            .recording
-            .borrow()
-            .as_ref()
-            .and_then(|(recording, _)| recording.area_border())
-        else {
             return;
         };
 
-        if let Err(reason) = overlay::availability() {
-            tracing::debug!(?reason, "No area border: overlays are unavailable");
+        let connector = monitor.connector().map(String::from);
+        if imp
+            .area_border
+            .borrow()
+            .as_ref()
+            .is_some_and(|shown| shown.geometry == geometry && shown.connector == connector)
+        {
             return;
         }
 
-        let area_border = AreaBorder::new(border, &monitor);
-        area_border.present();
-        imp.area_border.replace(Some(area_border));
+        // The old layer goes before the new one comes.
+        imp.area_border.take();
+        let layer = AreaBorder::new(geometry, &monitor);
+        // Tests never draw on the screen.
+        if !cfg!(test) {
+            layer.present();
+        }
+        imp.area_border.replace(Some(ShownBorder {
+            _layer: layer,
+            geometry,
+            connector,
+        }));
     }
 
     fn update_warnings_boxes(&self) {
@@ -945,6 +982,15 @@ impl Window {
             move |_| {
                 obj.update_title_label();
                 obj.update_area_row_visibility();
+                obj.update_area_border();
+            }
+        ));
+
+        settings.connect_show_area_border_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.update_area_border();
             }
         ));
 
@@ -1014,6 +1060,7 @@ impl Window {
             self,
             move |_| {
                 obj.update_area_dropdown();
+                obj.update_area_border();
             }
         ));
         if let Some(display) = gdk::Display::default() {
@@ -1023,6 +1070,7 @@ impl Window {
             areas::monitors::watch(&display, move || {
                 if let Some(obj) = obj.upgrade() {
                     obj.update_area_dropdown();
+                    obj.update_area_border();
                 }
             });
         }
@@ -1152,15 +1200,6 @@ fn camera_menu(sources: &[CameraSource]) -> gio::Menu {
     menu
 }
 
-/// Whether the border of the recorded area is on screen in `state`: during
-/// the countdown, the recording and the pause (P14).
-fn shows_area_border(state: RecordingState) -> bool {
-    matches!(
-        state,
-        RecordingState::Delayed { .. } | RecordingState::Recording | RecordingState::Paused
-    )
-}
-
 /// One label per capture warning, styled as a chip.
 fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
     warnings
@@ -1206,22 +1245,47 @@ mod tests {
         assert!(warning_chips(CaptureWarnings::default()).is_empty());
     }
 
-    #[test]
-    fn area_border_shows_from_countdown_until_stop() {
-        for state in [
-            RecordingState::Delayed { secs_left: 3 },
-            RecordingState::Recording,
-            RecordingState::Paused,
-        ] {
-            assert!(shows_area_border(state), "{state:?}");
+    /// The border is built, never presented.
+    #[gtk::test]
+    fn chosen_area_border_follows_mode_and_setting() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        if overlay::availability().is_err() {
+            eprintln!("Skipped: layers unavailable");
+            return;
         }
-        for state in [
-            RecordingState::Init,
-            RecordingState::Flushing { progress: 50 },
-            RecordingState::Finished,
-        ] {
-            assert!(!shows_area_border(state), "{state:?}");
-        }
+        let Some(monitor) = current_monitors().into_iter().next() else {
+            eprintln!("Skipped: no monitor");
+            return;
+        };
+        let app = Application::get();
+        let settings = app.settings();
+        let store = app.area_store();
+        let (monitor_width, monitor_height) = monitor.physical_size();
+        store.set_last(MarkedArea {
+            connector: monitor.connector.clone(),
+            x: 10,
+            y: 10,
+            width: 100,
+            height: 100,
+            monitor_width,
+            monitor_height,
+            scale: monitor.scale,
+        });
+        let shown = || window.imp().area_border.borrow().is_some();
+
+        settings.set_capture_mode(CaptureMode::MonitorWindow);
+        assert!(!shown());
+        settings.set_capture_mode(CaptureMode::Selection);
+        assert!(shown());
+        settings.set_show_area_border(false);
+        assert!(!shown());
+        settings.set_show_area_border(true);
+        assert!(shown());
+
+        settings.reset("capture-mode");
+        settings.reset("show-area-border");
+        assert!(!shown());
     }
 
     #[gtk::test]
@@ -1453,10 +1517,12 @@ mod tests {
         let record_button = window.imp().start_record_button.get();
         let mark_button = window.imp().mark_area_button.get();
         assert!(record_button.is_sensitive() && mark_button.is_sensitive());
+        // A new area starts from the chosen one.
+        Application::get().area_store().set_last(area(100));
 
         let mut marking = pin!(window.mark_area(MarkTarget::New));
         assert!(is_pending(marking.as_mut()).await);
-        assert_eq!(*initials.borrow(), [None]);
+        assert_eq!(*initials.borrow(), [Some(area(100))]);
         assert!(!record_button.is_sensitive());
         assert!(!mark_button.is_sensitive());
 
@@ -1468,7 +1534,7 @@ mod tests {
             .unwrap();
         assert_eq!(marking.await, None);
         assert!(record_button.is_sensitive() && mark_button.is_sensitive());
-        assert_eq!(*initials.borrow(), [None]);
+        assert_eq!(initials.borrow().len(), 1);
     }
 
     // The settings lock keeps other tests off the shared settings while

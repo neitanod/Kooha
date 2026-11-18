@@ -65,6 +65,44 @@ pub fn enabled_actions(state: RecordingState, marking: bool) -> EnabledActions {
     }
 }
 
+/// Where the area border on screen comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderSource {
+    /// No border.
+    None,
+    /// The area the recording captures.
+    Recording,
+    /// The chosen area, before recording.
+    Idle,
+}
+
+/// Where the area border comes from in the recording `state`. The border
+/// is a layer, so it needs `overlays`; `show_setting` off hides it always.
+/// From the countdown to the stop it is the recording's; with no recording,
+/// the chosen area's, in Selection mode and if it is not out of date.
+pub fn border_source(
+    state: RecordingState,
+    selection_mode: bool,
+    show_setting: bool,
+    has_fresh_area: bool,
+    overlays: bool,
+) -> BorderSource {
+    if !show_setting || !overlays {
+        return BorderSource::None;
+    }
+    match state {
+        RecordingState::Delayed { .. } | RecordingState::Recording | RecordingState::Paused => {
+            BorderSource::Recording
+        }
+        RecordingState::Init | RecordingState::Finished if selection_mode && has_fresh_area => {
+            BorderSource::Idle
+        }
+        RecordingState::Init | RecordingState::Finished | RecordingState::Flushing { .. } => {
+            BorderSource::None
+        }
+    }
+}
+
 /// The toast for an areas file that couldn't be loaded.
 pub fn notice_for_load_error(err: &LoadError) -> String {
     match err {
@@ -223,6 +261,65 @@ mod tests {
                 expected,
                 "{state:?}, marking: {marking}"
             );
+        }
+    }
+
+    #[test]
+    fn border_source_table() {
+        use BorderSource as B;
+        use RecordingState as S;
+
+        let recording_states = [S::Delayed { secs_left: 3 }, S::Recording, S::Paused];
+        let idle_states = [S::Init, S::Finished];
+
+        for selection in [false, true] {
+            for fresh in [false, true] {
+                for overlays in [false, true] {
+                    let all_states = recording_states
+                        .iter()
+                        .chain(&idle_states)
+                        .chain(&[S::Flushing { progress: 50 }]);
+                    // The setting off hides it always.
+                    for &state in all_states {
+                        assert_eq!(
+                            border_source(state, selection, false, fresh, overlays),
+                            B::None,
+                            "{state:?}"
+                        );
+                    }
+                    // Flushing has none.
+                    assert_eq!(
+                        border_source(
+                            S::Flushing { progress: 50 },
+                            selection,
+                            true,
+                            fresh,
+                            overlays
+                        ),
+                        B::None
+                    );
+                    for state in recording_states {
+                        let expected = if overlays { B::Recording } else { B::None };
+                        assert_eq!(
+                            border_source(state, selection, true, fresh, overlays),
+                            expected,
+                            "{state:?}, overlays: {overlays}"
+                        );
+                    }
+                    for state in idle_states {
+                        let expected = if selection && fresh && overlays {
+                            B::Idle
+                        } else {
+                            B::None
+                        };
+                        assert_eq!(
+                            border_source(state, selection, true, fresh, overlays),
+                            expected,
+                            "{state:?}, selection: {selection}, fresh: {fresh}, overlays: {overlays}"
+                        );
+                    }
+                }
+            }
         }
     }
 
