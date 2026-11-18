@@ -55,9 +55,11 @@ Source: test, 30 FPS, 20 s per variant, area 1280x720 at (200, 160)
 - A 30 FPS todas las variantes llegan sin pérdidas; las de hardware gastan menos CPU (56 a 69 %
   contra 74 a 76 %).
 
-**Orden provisional de Automático:** NVIDIA, Intel con conversión previa, CPU. Se confirma o se
-cambia con la medición del portal, que mide la fuente real de KDE y la batería no entra en la
-tabla: si la notebook está a batería, Intel puede convenir más aunque gaste algo más de CPU.
+**Orden provisional de Automático:** Intel con conversión previa, NVIDIA, CPU. Intel va primero
+porque `intel-convert` sostiene 60 FPS sin pérdidas (60,0 sobre 60) y, como pide la spec, gasta
+menos batería y deja dormida la placa NVIDIA. NVIDIA gasta menos CPU (89 % contra 102 %), pero
+despertarla cuesta batería y, con la placa dormida, varios segundos de arranque. El orden se
+confirma con la medición del portal, que mide la fuente real de KDE.
 
 ## Portal de KDE
 

@@ -20,12 +20,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The encoders Automatic tries, in order, with the CPU always last.
 ///
-/// Provisional, from the synthetic-source run of
-/// docs/perf/2026-11-18-capture-bench.md: NVIDIA kept 60 FPS with the least
-/// CPU, and Intel kept 60 FPS only with the CPU conversion to NV12. The run
-/// with the KDE portal confirms or changes it.
+/// Intel first, as the spec asks when it keeps 60 FPS: it uses less battery
+/// and leaves the NVIDIA card asleep. In the synthetic-source run of
+/// docs/perf/2026-11-18-capture-bench.md, Intel with the CPU conversion to
+/// NV12 kept 60 FPS with no frame lost. Provisional until the run with the
+/// KDE portal confirms it.
 pub const AUTO_ORDER: [H264Encoder; 3] =
-    [H264Encoder::Nvidia, H264Encoder::Intel, H264Encoder::Cpu];
+    [H264Encoder::Intel, H264Encoder::Nvidia, H264Encoder::Cpu];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum H264Encoder {
@@ -279,6 +280,14 @@ mod tests {
     fn auto_tries_the_cpu_last() {
         assert_eq!(candidates(VideoEncoder::Auto), AUTO_ORDER);
         assert_eq!(AUTO_ORDER.last(), Some(&H264Encoder::Cpu));
+    }
+
+    #[test]
+    fn auto_tries_intel_then_nvidia_then_the_cpu() {
+        assert_eq!(
+            AUTO_ORDER,
+            [H264Encoder::Intel, H264Encoder::Nvidia, H264Encoder::Cpu]
+        );
     }
 
     #[test]
