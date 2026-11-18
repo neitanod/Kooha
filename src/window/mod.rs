@@ -152,6 +152,9 @@ mod imp {
         pub(super) updating_area_dropdown: Cell<bool>,
         /// An area is being marked.
         pub(super) marking: Cell<bool>,
+        /// The toast of the last notice of the recording, until it is
+        /// withdrawn.
+        pub(super) recording_notice: RefCell<Option<adw::Toast>>,
         pub(super) hooks: RefCell<TestHooks>,
     }
 
@@ -717,6 +720,15 @@ impl Window {
                     });
                 }
             )),
+            recording.connect_notice_withdrawn(clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_| {
+                    obj.withdraw_recording_notice(&|| {
+                        Application::get().withdraw_notification("recording-notice");
+                    });
+                }
+            )),
         ];
         imp.recording
             .replace(Some((recording.clone(), handler_ids)));
@@ -749,8 +761,20 @@ impl Window {
     /// the desktop notification: the toast alone goes unseen with the window
     /// minimized (codex code r1 #7).
     fn show_recording_notice(&self, message: &str, notify: &dyn Fn(&str)) {
-        self.add_toast(adw::Toast::new(message));
+        let toast = adw::Toast::new(message);
+        self.imp().recording_notice.replace(Some(toast.clone()));
+        self.add_toast(toast);
         notify(message);
+    }
+
+    /// Takes back the notice of the recording, the toast and through
+    /// `withdraw` the desktop notification, as they could show in the video.
+    fn withdraw_recording_notice(&self, withdraw: &dyn Fn()) {
+        // The toast could show in the video too (fable code r3 #5).
+        if let Some(toast) = self.imp().recording_notice.take() {
+            toast.dismiss();
+        }
+        withdraw();
     }
 
     fn toggle_pause(&self) -> Result<()> {
@@ -1976,6 +2000,32 @@ mod tests {
             *sent.borrow(),
             ["Choose DP-3 (whole screen) in the sharing dialog"]
         );
+    }
+
+    #[gtk::test]
+    fn a_withdrawn_recording_notice_leaves_the_window_too() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        window.show_recording_notice("Choose DP-3 (whole screen) in the sharing dialog", &|_| {});
+        let toast = window.imp().recording_notice.borrow().clone().unwrap();
+        let dismissed = Rc::new(Cell::new(0));
+        toast.connect_dismissed({
+            let dismissed = dismissed.clone();
+            move |_| dismissed.set(dismissed.get() + 1)
+        });
+        let withdrawn = Cell::new(0);
+
+        // The recording starts (fable code r3 #5).
+        window.withdraw_recording_notice(&|| withdrawn.set(withdrawn.get() + 1));
+
+        assert_eq!(dismissed.get(), 1);
+        assert_eq!(withdrawn.get(), 1);
+        assert!(window.imp().recording_notice.borrow().is_none());
+
+        // Withdrawn already: only the notification, which may be gone.
+        window.withdraw_recording_notice(&|| withdrawn.set(withdrawn.get() + 1));
+        assert_eq!(dismissed.get(), 1);
+        assert_eq!(withdrawn.get(), 2);
     }
 
     #[gtk::test]

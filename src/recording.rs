@@ -482,6 +482,7 @@ mod imp {
                     Signal::builder("notice")
                         .param_types([String::static_type()])
                         .build(),
+                    Signal::builder("notice-withdrawn").build(),
                 ]
             });
 
@@ -588,7 +589,7 @@ impl Recording {
                 },
                 || settings.reset_screencast_restore_token(),
                 |message| self.emit_notice(&message),
-                || Application::get().withdraw_notification("recording-notice"),
+                || self.emit_by_name::<()>("notice-withdrawn", &[]),
                 |restore_token| {
                     settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
                 },
@@ -878,6 +879,20 @@ impl Recording {
             false,
             closure_local!(|obj: &Self, message: String| {
                 f(obj, &message);
+            }),
+        )
+    }
+
+    /// The notice is no longer true, and could show in the video.
+    pub fn connect_notice_withdrawn<F>(&self, f: F) -> glib::SignalHandlerId
+    where
+        F: Fn(&Self) + 'static,
+    {
+        self.connect_closure(
+            "notice-withdrawn",
+            false,
+            closure_local!(|obj: &Self| {
+                f(obj);
             }),
         )
     }
