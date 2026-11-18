@@ -1,9 +1,16 @@
 //! The camera control value Kooha changed and has not written back yet, kept
 //! in a file while it is changed, so that a Kooha that dies without writing
 //! it back does it on its next start.
+//!
+//! While the control is changed, the Kooha that changed it holds an
+//! exclusive `flock` on `camera-control.json.lock`. The kernel releases it
+//! when that Kooha dies, so a file whose lock can be taken is a leftover,
+//! and one whose lock is held belongs to a Kooha still running.
 
 use std::{
+    ffi::OsString,
     fs, io,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
@@ -18,6 +25,16 @@ pub struct ChangedControl {
     pub value: i32,
 }
 
+/// A control this Kooha changed and has to write back. It holds the lock of
+/// the state file until then, so that another Kooha doesn't take it for a
+/// leftover (codex code r2 #3).
+#[derive(Debug)]
+pub struct HeldControl {
+    control: ChangedControl,
+    /// `None` if the lock file couldn't be opened.
+    _lock: Option<fs::File>,
+}
+
 /// Where the changed control is kept: the user state directory, or a
 /// temporary directory in tests.
 pub fn default_path() -> PathBuf {
@@ -28,15 +45,33 @@ pub fn default_path() -> PathBuf {
     dir.join("kooha").join("camera-control.json")
 }
 
-/// Keeps `control` in `path`, then writes 0 to it with `set`. Returns
-/// whether it changed; if it did not, nothing is kept.
+/// Keeps `control` in `path`, then writes 0 to it with `set`. Returns the
+/// control to write back if it changed; if it did not, nothing is kept.
+///
+/// Another Kooha holding the lock has a control changed already: this one
+/// changes nothing, as its value would replace the other's.
 pub fn change(
     path: &Path,
-    control: &ChangedControl,
+    control: ChangedControl,
     mut set: impl FnMut(&Path, i32) -> io::Result<()>,
-) -> bool {
+) -> Option<HeldControl> {
+    let lock = match try_lock(path) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            tracing::info!(
+                "Another Kooha keeps the frame rate of a camera; leaving {} as it is",
+                control.node.display()
+            );
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!("Failed to lock {}: {:?}", path.display(), err);
+            None
+        }
+    };
+
     // Kept first: Kooha may die right after writing 0.
-    if let Err(err) = save(path, control) {
+    if let Err(err) = save(path, &control) {
         tracing::warn!(
             "Failed to keep the camera control in {}: {:?}",
             path.display(),
@@ -45,7 +80,10 @@ pub fn change(
     }
 
     match set(&control.node, 0) {
-        Ok(()) => true,
+        Ok(()) => Some(HeldControl {
+            control,
+            _lock: lock,
+        }),
         Err(err) => {
             tracing::warn!(
                 "Failed to keep the frame rate of {}: {:?}",
@@ -53,18 +91,20 @@ pub fn change(
                 err
             );
             forget(path);
-            false
+            None
         }
     }
 }
 
-/// Writes `control`'s value back with `set` and forgets it, also when the
+/// Writes `held`'s value back with `set` and forgets it, also when the
 /// write fails: a camera that is gone may leave its node to another one.
+/// The lock goes last.
 pub fn write_back(
     path: &Path,
-    control: &ChangedControl,
+    held: HeldControl,
     mut set: impl FnMut(&Path, i32) -> io::Result<()>,
 ) {
+    let control = &held.control;
     if let Err(err) = set(&control.node, control.value) {
         tracing::warn!(
             "Failed to restore the frame rate setting of {}: {:?}",
@@ -73,13 +113,32 @@ pub fn write_back(
         );
     }
     forget(path);
+    drop(held);
 }
 
-/// Writes back the control that a previous Kooha left changed, if any.
-pub fn restore_leftover(path: &Path, set: impl FnMut(&Path, i32) -> io::Result<()>) {
+/// Writes back the control that a previous Kooha left changed, if any. A
+/// control whose lock another Kooha holds is that Kooha's, still running,
+/// and is left alone.
+pub fn restore_leftover(path: &Path, mut set: impl FnMut(&Path, i32) -> io::Result<()>) {
     if !path.exists() {
         return;
     }
+
+    // An error says nothing about an owner: restore, as before the lock.
+    let lock = match try_lock(path) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            tracing::debug!(
+                "The camera control in {} belongs to a running Kooha",
+                path.display()
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("Failed to lock {}: {:?}", path.display(), err);
+            None
+        }
+    };
 
     match load(path) {
         Some(control) if v4l2::video_node(&control.node.to_string_lossy()).is_some() => {
@@ -88,7 +147,14 @@ pub fn restore_leftover(path: &Path, set: impl FnMut(&Path, i32) -> io::Result<(
                 value = control.value,
                 "Restoring a camera control left changed"
             );
-            write_back(path, &control, set);
+            write_back(
+                path,
+                HeldControl {
+                    control,
+                    _lock: lock,
+                },
+                &mut set,
+            );
         }
         other => {
             tracing::warn!(
@@ -99,6 +165,40 @@ pub fn restore_leftover(path: &Path, set: impl FnMut(&Path, i32) -> io::Result<(
             forget(path);
         }
     }
+}
+
+/// Takes the lock of the state file at `path` without waiting: `None` if
+/// another Kooha, or another handle of this one, holds it.
+fn try_lock(path: &Path) -> io::Result<Option<fs::File>> {
+    let lock_path = lock_path(path);
+    if let Some(dir) = lock_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    loop {
+        // SAFETY: the descriptor is open for as long as `file` lives.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        let err = io::Error::last_os_error();
+        match err.kind() {
+            io::ErrorKind::WouldBlock => return Ok(None),
+            io::ErrorKind::Interrupted => {}
+            _ => return Err(err),
+        }
+    }
+}
+
+/// `camera-control.json.lock`, next to the state file. The file itself
+/// can't hold the lock: every save renames a new one into place.
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = OsString::from(path.as_os_str());
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
 /// The control kept in `path`, if it holds a valid one.
@@ -137,14 +237,33 @@ mod tests {
 
     use super::*;
 
-    /// A state file path in a directory of its own, which does not exist yet.
-    fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kooha-changed-control-test-{}-{name}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        dir.join("kooha").join("camera-control.json")
+    /// A state file path in a directory of its own, which does not exist
+    /// yet and is removed on drop (fable code r2 #7).
+    struct TempState {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempState {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "kooha-changed-control-test-{}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            let path = dir.join("kooha").join("camera-control.json");
+            Self { dir, path }
+        }
+    }
+
+    impl Drop for TempState {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn ok() -> io::Result<()> {
+        Ok(())
     }
 
     /// A setter that records its calls and answers `answer`.
@@ -175,55 +294,55 @@ mod tests {
 
     #[test]
     fn a_changed_control_is_kept_until_written_back() {
-        let path = temp_path("kept");
+        let state = TempState::new("kept");
+        let path = &state.path;
         let calls = RefCell::new(Vec::new());
 
-        let changed = change(
-            &path,
-            &control("/dev/video0", 1),
-            recording_setter(&calls, || Ok(())),
-        );
-        assert!(changed);
+        let held = change(
+            path,
+            control("/dev/video0", 1),
+            recording_setter(&calls, ok),
+        )
+        .unwrap();
         assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video0"), 0)]);
-        assert_eq!(load(&path), Some(control("/dev/video0", 1)));
+        assert_eq!(load(path), Some(control("/dev/video0", 1)));
 
-        write_back(
-            &path,
-            &control("/dev/video0", 1),
-            recording_setter(&calls, || Ok(())),
-        );
+        write_back(path, held, recording_setter(&calls, ok));
         assert_eq!(calls.borrow()[1], (PathBuf::from("/dev/video0"), 1));
         assert!(!path.exists());
     }
 
     #[test]
     fn a_control_that_could_not_change_is_not_kept() {
-        let path = temp_path("not-changed");
+        let state = TempState::new("not-changed");
+        let path = &state.path;
         let calls = RefCell::new(Vec::new());
 
-        let changed = change(
-            &path,
-            &control("/dev/video0", 1),
+        let held = change(
+            path,
+            control("/dev/video0", 1),
             recording_setter(&calls, || Err(io::Error::other("busy"))),
         );
-        assert!(!changed);
+        assert!(held.is_none());
         assert!(!path.exists());
     }
 
     #[test]
     fn a_failed_write_back_forgets_the_control() {
-        let path = temp_path("failed-write-back");
+        let state = TempState::new("failed-write-back");
+        let path = &state.path;
         let calls = RefCell::new(Vec::new());
-        assert!(change(
-            &path,
-            &control("/dev/video0", 1),
-            recording_setter(&calls, || Ok(())),
-        ));
+        let held = change(
+            path,
+            control("/dev/video0", 1),
+            recording_setter(&calls, ok),
+        )
+        .unwrap();
 
         // The camera is gone: another one may get its node.
         write_back(
-            &path,
-            &control("/dev/video0", 1),
+            path,
+            held,
             recording_setter(&calls, || Err(io::Error::other("unplugged"))),
         );
         assert!(!path.exists());
@@ -231,22 +350,76 @@ mod tests {
 
     #[test]
     fn a_leftover_control_is_written_back_at_start() {
-        let path = temp_path("leftover");
-        save(&path, &control("/dev/video2", 1)).unwrap();
+        let state = TempState::new("leftover");
+        let path = &state.path;
+        save(path, &control("/dev/video2", 1)).unwrap();
         let calls = RefCell::new(Vec::new());
 
-        restore_leftover(&path, recording_setter(&calls, || Ok(())));
+        restore_leftover(path, recording_setter(&calls, || Ok(())));
 
         assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video2"), 1)]);
         assert!(!path.exists());
     }
 
     #[test]
+    fn a_control_another_live_kooha_changed_is_left_alone() {
+        let state = TempState::new("live-owner");
+        let path = &state.path;
+        let calls = RefCell::new(Vec::new());
+        let held = change(path, control("/dev/video0", 1), recording_setter(&calls, ok)).unwrap();
+
+        // A second Kooha starts while the first one records with the
+        // camera on (codex code r2 #3).
+        let other_calls = RefCell::new(Vec::new());
+        restore_leftover(path, recording_setter(&other_calls, ok));
+        assert!(other_calls.borrow().is_empty());
+        assert_eq!(load(path), Some(control("/dev/video0", 1)));
+
+        // Nor does it change the control under the first one.
+        let other = change(path, control("/dev/video0", 0), recording_setter(&other_calls, ok));
+        assert!(other.is_none());
+        assert!(other_calls.borrow().is_empty());
+        assert_eq!(load(path), Some(control("/dev/video0", 1)));
+
+        write_back(path, held, recording_setter(&calls, ok));
+        assert_eq!(calls.borrow()[1], (PathBuf::from("/dev/video0"), 1));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_control_left_by_a_kooha_that_died_is_restored() {
+        let state = TempState::new("dead-owner");
+        let path = &state.path;
+        let held = change(path, control("/dev/video0", 1), |_, _| Ok(())).unwrap();
+        // Dying releases the lock, and writes nothing back.
+        drop(held);
+
+        let calls = RefCell::new(Vec::new());
+        restore_leftover(path, recording_setter(&calls, ok));
+
+        assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video0"), 1)]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_test_state_is_removed_on_drop() {
+        let state = TempState::new("removed");
+        save(&state.path, &control("/dev/video0", 1)).unwrap();
+        let dir = state.dir.clone();
+        assert!(dir.exists());
+
+        drop(state);
+
+        assert!(!dir.exists());
+    }
+
+    #[test]
     fn no_leftover_writes_nothing() {
-        let path = temp_path("none");
+        let state = TempState::new("none");
+        let path = &state.path;
         let calls = RefCell::new(Vec::new());
 
-        restore_leftover(&path, recording_setter(&calls, || Ok(())));
+        restore_leftover(path, recording_setter(&calls, || Ok(())));
 
         assert!(calls.borrow().is_empty());
         assert!(!path.exists());
@@ -258,12 +431,13 @@ mod tests {
             ("broken", r#"{"node": "/dev/video0", "val"#),
             ("not-a-video-node", r#"{"node": "/dev/sda", "value": 1}"#),
         ] {
-            let path = temp_path(name);
+            let state = TempState::new(name);
+        let path = &state.path;
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, contents).unwrap();
+            fs::write(path, contents).unwrap();
             let calls = RefCell::new(Vec::new());
 
-            restore_leftover(&path, recording_setter(&calls, || Ok(())));
+            restore_leftover(path, recording_setter(&calls, || Ok(())));
 
             assert!(calls.borrow().is_empty(), "{name}");
             assert!(!path.exists(), "{name}");

@@ -26,7 +26,7 @@ use gtk::{
 
 use self::{
     caps::{CameraFailure, camera_failure, preferred_caps},
-    changed_control::ChangedControl,
+    changed_control::{ChangedControl, HeldControl},
     devices::{CameraSource, DeviceCache},
     geometry::{PipShape, clamp_position, default_position, fitted_size, resized, should_mirror},
     view::PipView,
@@ -76,7 +76,7 @@ mod imp {
         pub(super) camera_node: RefCell<Option<PathBuf>>,
         /// The node and the `exposure_dynamic_framerate` value to write back
         /// when the camera stops.
-        pub(super) restore_control: RefCell<Option<ChangedControl>>,
+        pub(super) restore_control: RefCell<Option<HeldControl>>,
         pub(super) drag: RefCell<DragTracker>,
         /// Applies the drag once per frame while dragging.
         pub(super) drag_tick: RefCell<Option<gtk::TickCallbackId>>,
@@ -371,12 +371,12 @@ impl CameraPip {
             node,
             value: restore_to,
         };
-        if changed_control::change(
+        if let Some(held) = changed_control::change(
             &changed_control::default_path(),
-            &control,
+            control,
             set_dynamic_framerate,
         ) {
-            imp.restore_control.replace(Some(control));
+            imp.restore_control.replace(Some(held));
         }
     }
 
@@ -385,10 +385,10 @@ impl CameraPip {
     /// the app also calls it when it quits, which may not dispose of the
     /// `PiP`. If Kooha dies before, the next `new` does it.
     pub fn restore_camera_controls(&self) {
-        if let Some(control) = self.imp().restore_control.take() {
+        if let Some(held) = self.imp().restore_control.take() {
             changed_control::write_back(
                 &changed_control::default_path(),
-                &control,
+                held,
                 set_dynamic_framerate,
             );
         }
