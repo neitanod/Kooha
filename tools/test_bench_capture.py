@@ -10,7 +10,9 @@ portal answers and the monitors are injected, and the pipelines use
 videotestsrc.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 import tempfile
@@ -63,6 +65,212 @@ class TokenWriterTest(unittest.TestCase):
         self.on_started(start_results(token=""), 0.3)
 
         self.assertEqual(self.written, [])
+
+
+class TokenBackupTest(unittest.TestCase):
+    NOW = time.struct_time((2026, 11, 18, 21, 5, 9, 2, 322, 0))
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="kooha-bench-test-")
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def backup(self, token):
+        return bench.backup_token(token, runtime_dir=self.dir, now=self.NOW)
+
+    def test_backup_goes_to_the_runtime_dir_with_the_date(self):
+        path = self.backup("original")
+
+        self.assertEqual(
+            path, os.path.join(self.dir, "kooha-bench-token-20261118-210509.bak")
+        )
+        with open(path) as f:
+            self.assertEqual(f.read(), "original\n")
+
+    def test_backup_is_private(self):
+        path = self.backup("original")
+
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_second_backup_never_overwrites_the_first(self):
+        first = self.backup("original")
+        second = self.backup("successor")
+
+        self.assertNotEqual(first, second)
+        with open(first) as f:
+            self.assertEqual(f.read(), "original\n")
+        with open(second) as f:
+            self.assertEqual(f.read(), "successor\n")
+
+    def test_backup_does_not_follow_a_planted_symlink(self):
+        target = os.path.join(self.dir, "target")
+        planted = os.path.join(self.dir, "kooha-bench-token-20261118-210509.bak")
+        os.symlink(target, planted)
+
+        path = self.backup("original")
+
+        self.assertNotEqual(path, planted)
+        self.assertFalse(os.path.exists(target))
+
+    def test_no_runtime_dir_is_an_error(self):
+        with self.assertRaises(RuntimeError):
+            bench.backup_token("original", runtime_dir="", now=self.NOW)
+
+
+SESSION = "/org/freedesktop/portal/desktop/session/1_2/kooha_bench"
+
+
+class FakeBus:
+    """The session bus, as Portal uses it: it answers every request but the
+    ones in `silent`, and records the session closes."""
+
+    def __init__(self, silent=(), output=None):
+        self.silent = silent
+        self.output = output
+        self.handlers = {}
+        self.calls = []
+        self.closed = []
+        self.output_at = {}
+
+    def get_unique_name(self):
+        return ":1.2"
+
+    def signal_subscribe(self, _name, _iface, _signal, path, *rest):
+        handler = rest[-1]
+        self.handlers[path] = handler
+        return path
+
+    def signal_unsubscribe(self, sub):
+        self.handlers.pop(sub, None)
+
+    def answer(self, method, request_path):
+        self.calls.append(method)
+        if self.output is not None:
+            self.output_at[method] = self.output.getvalue()
+        if method in self.silent:
+            return
+        results = {
+            "CreateSession": {"session_handle": bench.GLib.Variant("s", SESSION)},
+            "SelectSources": {},
+            "Start": {
+                "streams": bench.GLib.Variant(
+                    "a(ua{sv})",
+                    [
+                        (
+                            42,
+                            {
+                                "source_type": bench.GLib.Variant("u", 1),
+                                "size": bench.GLib.Variant("(ii)", (1680, 1050)),
+                            },
+                        )
+                    ],
+                ),
+                "restore_token": bench.GLib.Variant("s", "successor"),
+            },
+        }[method]
+        params = bench.GLib.Variant("(ua{sv})", (0, results))
+        self.handlers[request_path](None, None, request_path, None, None, params)
+
+    def call_sync(self, _name, path, _iface, method, *_rest):
+        self.closed.append((path, method))
+
+
+class FakeProxy:
+    def __init__(self, bus):
+        self.bus = bus
+
+    def get_cached_property(self, _name):
+        return None
+
+    def call_sync(self, method, args, *_rest):
+        options = args.unpack()[-1]
+        token = options["handle_token"]
+        self.bus.answer(method, f"{bench.PORTAL_PATH}/request/1_2/{token}")
+
+
+def fake_portal(bus, start_timeout=bench.START_TIMEOUT):
+    portal = bench.Portal.__new__(bench.Portal)
+    portal.bus = bus
+    portal.proxy = FakeProxy(bus)
+    portal.sender = "1_2"
+    portal.counter = 0
+    portal.session = None
+    portal.start_timeout = start_timeout
+    return portal
+
+
+class StartTest(unittest.TestCase):
+    def test_start_has_a_thirty_second_deadline(self):
+        self.assertEqual(bench.START_TIMEOUT, 30)
+        self.assertEqual(bench.Portal.start_timeout, 30)
+
+    def test_unanswered_start_closes_the_session_without_writing(self):
+        bus = FakeBus(silent={"Start"})
+        portal = fake_portal(bus, start_timeout=0.3)
+        written = []
+
+        start = time.monotonic()
+        with self.assertRaises(bench.StartTimeout):
+            portal.open(
+                bench.SOURCE_MONITOR,
+                bench.PERSIST_UNTIL_REVOKED,
+                "original",
+                bench.token_writer(written.append),
+                "note",
+            )
+        elapsed = time.monotonic() - start
+
+        self.assertGreaterEqual(elapsed, 0.3)
+        self.assertLess(elapsed, 2)
+        self.assertEqual(written, [])
+        self.assertEqual(bus.closed, [(SESSION, "Close")])
+        self.assertIsNone(portal.session)
+
+    def test_answered_start_writes_the_successor(self):
+        bus = FakeBus(silent={"OpenPipeWireRemote"})
+        portal = fake_portal(bus)
+        written = []
+        portal.proxy.call_with_unix_fd_list_sync = lambda *_a: (
+            bench.GLib.Variant("(h)", (0,)),
+            FakeFdList(),
+        )
+
+        stream = portal.open(
+            bench.SOURCE_MONITOR,
+            bench.PERSIST_UNTIL_REVOKED,
+            "original",
+            bench.token_writer(written.append),
+            "note",
+        )
+
+        self.assertEqual(written, ["successor"])
+        self.assertEqual(stream["size"], (1680, 1050))
+
+    def test_each_start_says_first_whether_to_answer_the_dialog(self):
+        for opener, expected in [
+            (bench.open_kooha_session, "Kooha session: do not answer a dialog"),
+            (bench.open_region_session, "Region session: pick the region now"),
+        ]:
+            output = io.StringIO()
+            bus = FakeBus(silent={"Start"}, output=output)
+            portal = fake_portal(bus, start_timeout=0.05)
+            with contextlib.redirect_stdout(output), self.assertRaises(
+                bench.StartTimeout
+            ):
+                if opener is bench.open_kooha_session:
+                    opener(portal, None, read=lambda: "original", backup=lambda _t: "/x")
+                else:
+                    opener(portal)
+
+            self.assertIn(expected, bus.output_at["Start"], opener.__name__)
+            self.assertNotIn(expected, bus.output_at["SelectSources"], opener.__name__)
+
+
+class FakeFdList:
+    def get(self, _index):
+        return 7
 
 
 # DP-3 at 105 %: KDE may report the logical size, the frames are physical.
@@ -213,7 +421,13 @@ class ResultTest(unittest.TestCase):
         self.assertFalse(result(missing=7, queue_drop=6).ok)
 
     def test_under_one_percent_is_ok(self):
-        self.assertTrue(result(missing=6, queue_drop=6).ok)
+        self.assertTrue(result(missing=6, queue_drop=5).ok)
+
+    def test_exactly_one_percent_is_not_ok(self):
+        self.assertFalse(result(missing=6, queue_drop=6).ok)
+
+    def test_over_one_percent_is_not_ok(self):
+        self.assertFalse(result(missing=7, queue_drop=6).ok)
 
     def test_nothing_recorded_is_not_ok(self):
         self.assertFalse(bench.Result("today").ok)

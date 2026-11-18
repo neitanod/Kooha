@@ -55,9 +55,30 @@ Source: test, 30 FPS, 20 s per variant, area 1280x720 at (200, 160)
 - A 30 FPS todas las variantes llegan sin pérdidas; las de hardware gastan menos CPU (56 a 69 %
   contra 74 a 76 %).
 
-**Orden provisional de Automático:** NVIDIA, Intel con conversión previa, CPU. Se confirma o se
-cambia con la medición del portal, que mide la fuente real de KDE y la batería no entra en la
-tabla: si la notebook está a batería, Intel puede convenir más aunque gaste algo más de CPU.
+**Orden provisional de Automático:** Intel con conversión previa, NVIDIA, CPU. Intel va primero
+porque `intel-convert` sostiene 60 FPS sin pérdidas (60,0 sobre 60) y, como pide la spec, gasta
+menos batería y deja dormida la placa NVIDIA. NVIDIA gasta menos CPU (89 % contra 102 %), pero
+despertarla cuesta batería y, con la placa dormida, varios segundos de arranque. El orden se
+confirma con la medición del portal, que mide la fuente real de KDE.
+
+## Calidad de los codificadores
+
+Las cadenas de hardware fijan un cuantizador constante de 17, el `qp-max=17` de la cadena de CPU
+(`x264enc`), para que el texto en pantalla salga igual de nítido con cualquiera de los tres. Los
+nombres y los valores salen de `list_properties()` de cada elemento con Python gi, en esta
+máquina (GStreamer 1.28.2):
+
+| codificador | propiedades | valores por defecto que reemplazan |
+|---|---|---|
+| `vah264lpenc` | `rate-control=cqp qpi=17 qpp=17 qpb=17` | `rate-control=cbr`, `qpi`/`qpp`/`qpb` en 26 |
+| `nvh264enc` | `rc-mode=constqp qp-const=17` | `rc-mode=default`, `qp-const=-1` |
+| `x264enc` | `qp-max=17` (sin cambios) | `qp-max=51` |
+
+`vah264lpenc` en esta máquina admite `cbr`, `vbr`, `cqp` y `qvbr`. Las dos cadenas codificaron 30
+cuadros de 1280×720 hasta el EOS con esos valores. Las mediciones de las tablas de arriba son
+anteriores a este cambio: corrieron con los valores por defecto de cada elemento.
+`tools/bench-capture.py` usa desde entonces los mismos valores, y la cola antes del codificador
+con el tope de 256 MiB del código, así que la medición con el portal mide las cadenas de Kooha.
 
 ## Portal de KDE
 

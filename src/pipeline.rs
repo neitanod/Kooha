@@ -22,6 +22,16 @@ use crate::{
 
 const AUDIO_SAMPLE_RATE: i32 = 48_000;
 
+/// The size the encoder is probed with when recording whole streams. The
+/// portal may tell a stream's size in logical pixels (1463x914 for eDP-1 at
+/// 1.75), which x264 refuses, and the size of the frames is known only from
+/// the caps, once the pipeline plays. An encoder that fails at that size is
+/// an error of the recording.
+pub const WHOLE_STREAMS_PROBE_SIZE: (i32, i32) = (1920, 1080);
+
+/// The most raw video the queue before the encoder holds.
+const VIDEOENC_QUEUE_MAX_BYTES: u32 = 256 * 1024 * 1024;
+
 #[derive(Debug)]
 #[must_use]
 pub struct PipelineBuilder {
@@ -104,24 +114,19 @@ impl PipelineBuilder {
         self
     }
 
-    /// The size of the frames the encoder gets, or `None` when a stream does
-    /// not tell its size.
-    pub fn output_size(&self) -> Option<(i32, i32)> {
+    /// The size to probe the encoder with: the size of the frames the
+    /// encoder gets when an area fixes it, and `WHOLE_STREAMS_PROBE_SIZE`
+    /// otherwise.
+    pub fn probe_size(&self) -> (i32, i32) {
         if let Some(area) = self.area_crop {
-            return Some((area.width, area.height));
+            return (area.width, area.height);
         }
 
         if let Some(ref data) = self.select_area_data {
-            return Some(scaled_caps_size(cropped_size(&compute_crop(data))));
+            return scaled_caps_size(cropped_size(&compute_crop(data)));
         }
 
-        // The compositor puts the streams side by side.
-        self.streams
-            .iter()
-            .try_fold((0, 0), |(width, height), stream| {
-                let (stream_width, stream_height) = stream.size()?;
-                Some((width + stream_width, height.max(stream_height)))
-            })
+        WHOLE_STREAMS_PROBE_SIZE
     }
 
     /// Builds the pipeline.
@@ -273,10 +278,12 @@ pub fn link_gated_queue(
         .name(queue_name)
         .build()?;
     if branch == GatedBranch::Video {
-        // Room for a burst in the encoder without stalling the capture.
+        // Room for a burst in the encoder without stalling the capture. The
+        // byte cap bounds the memory of whole-monitor frames: 30 BGRx frames
+        // of 2560x1600 are about 490 MB.
         queue.set_property("max-size-buffers", 30_u32);
         queue.set_property("max-size-time", 0_u64);
-        queue.set_property("max-size-bytes", 0_u32);
+        queue.set_property("max-size-bytes", VIDEOENC_QUEUE_MAX_BYTES);
     }
     pipeline.add_many([&identity, &queue])?;
     src.link(&identity)?;
@@ -1017,36 +1024,41 @@ mod test {
     }
 
     #[test]
-    fn output_size_of_an_area_is_the_area() {
+    fn probe_size_of_an_area_is_the_area() {
         init_resources();
 
         let mut builder = builder_for(&[Some((1680, 1050))]);
         builder.area_crop(AREA);
-        assert_eq!(builder.output_size(), Some((1280, 720)));
+        assert_eq!(builder.probe_size(), (1280, 720));
     }
 
     #[test]
-    fn output_size_of_the_selector_is_the_scaled_crop() {
+    fn probe_size_of_the_selector_is_the_scaled_crop() {
         init_resources();
 
         let mut builder = builder_for(&[Some((1921, 1081))]);
         builder.select_area_data(select_area_data((1921, 1081)));
-        assert_eq!(builder.output_size(), Some((800, 600)));
+        assert_eq!(builder.probe_size(), (800, 600));
     }
 
     #[test]
-    fn output_size_of_whole_streams_is_side_by_side() {
+    fn probe_size_of_whole_streams_is_fixed_and_even() {
         init_resources();
 
-        assert_eq!(
-            builder_for(&[Some((1920, 1080))]).output_size(),
-            Some((1920, 1080))
-        );
-        assert_eq!(
-            builder_for(&[Some((1920, 1080)), Some((2560, 1600))]).output_size(),
-            Some((4480, 1600))
-        );
-        assert_eq!(builder_for(&[Some((1920, 1080)), None]).output_size(), None);
+        // eDP-1 in logical pixels, which x264 refuses: the frames come in
+        // physical pixels, known only from the caps.
+        for sizes in [
+            &[Some((1463, 914))][..],
+            &[Some((1920, 1080)), Some((2560, 1600))],
+            &[Some((1920, 1080)), None],
+        ] {
+            assert_eq!(
+                builder_for(sizes).probe_size(),
+                WHOLE_STREAMS_PROBE_SIZE,
+                "{sizes:?}"
+            );
+        }
+        assert_eq!(WHOLE_STREAMS_PROBE_SIZE, (1920, 1080));
     }
 
     #[test]
@@ -1270,11 +1282,11 @@ mod test {
     }
 
     #[test]
-    fn videoenc_queue_holds_thirty_buffers() {
+    fn videoenc_queue_holds_thirty_buffers_up_to_256_mib() {
         let pipeline = built_pipeline(|_| {});
 
         let queue = pipeline.by_name("kooha-videoenc-queue").unwrap();
-        assert_eq!(queue_limits(&queue), (30, 0, 0));
+        assert_eq!(queue_limits(&queue), (30, 0, 256 * 1024 * 1024));
         assert_eq!(leaky_nick(&queue), "no");
     }
 

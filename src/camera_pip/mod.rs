@@ -2,6 +2,7 @@
 //! recorded because it is on screen (ADR 0002).
 
 pub mod caps;
+mod changed_control;
 pub mod devices;
 pub mod geometry;
 pub mod v4l2;
@@ -25,6 +26,7 @@ use gtk::{
 
 use self::{
     caps::{CameraFailure, camera_failure, preferred_caps},
+    changed_control::ChangedControl,
     devices::{CameraSource, DeviceCache},
     geometry::{PipShape, clamp_position, default_position, fitted_size, resized, should_mirror},
     view::PipView,
@@ -74,7 +76,7 @@ mod imp {
         pub(super) camera_node: RefCell<Option<PathBuf>>,
         /// The node and the `exposure_dynamic_framerate` value to write back
         /// when the camera stops.
-        pub(super) restore_control: RefCell<Option<(PathBuf, i32)>>,
+        pub(super) restore_control: RefCell<Option<ChangedControl>>,
         pub(super) drag: RefCell<DragTracker>,
         /// Applies the drag once per frame while dragging.
         pub(super) drag_tick: RefCell<Option<gtk::TickCallbackId>>,
@@ -108,6 +110,8 @@ impl CameraPip {
 
         imp.settings.set(settings.clone()).unwrap();
         imp.view.set(PipView::new()).unwrap();
+        // A Kooha that died with the camera on may have left it changed.
+        changed_control::restore_leftover(&changed_control::default_path(), set_dynamic_framerate);
         if overlay::availability().is_ok() {
             imp.devices.set(DeviceCache::start()).unwrap();
         }
@@ -363,30 +367,29 @@ impl CameraPip {
             return;
         };
 
-        match v4l2::set_control(&node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE, 0) {
-            Ok(()) => {
-                imp.restore_control.replace(Some((node, restore_to)));
-            }
-            Err(err) => tracing::warn!(
-                "Failed to keep the frame rate of {}: {:?}",
-                node.display(),
-                err
-            ),
+        let control = ChangedControl {
+            node,
+            value: restore_to,
+        };
+        if changed_control::change(
+            &changed_control::default_path(),
+            &control,
+            set_dynamic_framerate,
+        ) {
+            imp.restore_control.replace(Some(control));
         }
     }
 
     /// Writes back the `exposure_dynamic_framerate` value that
     /// `keep_camera_framerate` replaced, if any. Stopping the camera does it;
     /// the app also calls it when it quits, which may not dispose of the
-    /// `PiP`.
+    /// `PiP`. If Kooha dies before, the next `new` does it.
     pub fn restore_camera_controls(&self) {
-        if let Some((node, value)) = self.imp().restore_control.take()
-            && let Err(err) = v4l2::set_control(&node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE, value)
-        {
-            tracing::warn!(
-                "Failed to restore the frame rate setting of {}: {:?}",
-                node.display(),
-                err
+        if let Some(control) = self.imp().restore_control.take() {
+            changed_control::write_back(
+                &changed_control::default_path(),
+                &control,
+                set_dynamic_framerate,
             );
         }
     }
@@ -1046,6 +1049,11 @@ fn camera_pipeline(
 /// its frame rate in low light, and writes `restore_to` back when it stops.
 fn keep_framerate_plan(enabled: bool, current: Option<i32>) -> Option<i32> {
     current.filter(|&value| enabled && value != 0)
+}
+
+/// Writes `exposure_dynamic_framerate` of the camera at `node`.
+fn set_dynamic_framerate(node: &Path, value: i32) -> std::io::Result<()> {
+    v4l2::set_control(node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE, value)
 }
 
 /// The V4L2 node of `device`, if it has one.

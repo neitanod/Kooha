@@ -36,7 +36,8 @@ Sources:
                      screen did not change often enough to measure.
 
 The restore token (portal and --probe-session). Before opening the session the
-current token is saved to /tmp/kooha-bench-token.bak. Start spends the token:
+current token is saved to $XDG_RUNTIME_DIR/kooha-bench-token-<date>-<time>.bak,
+readable only by the user and never over an earlier backup. Start spends the token:
 KDE hands out a successor with every session. Whenever Start succeeds and the
 stream is a monitor, the script writes the successor to Kooha's key as soon as
 Start answers, before any pipeline runs, however long Start took: the original
@@ -46,8 +47,14 @@ successor). The seconds Start took are printed, as a fact only.
 
 The .bak is only restored by hand
 (`gsettings set io.github.seadve.Kooha screencast-restore-token "$(cat
-/tmp/kooha-bench-token.bak)"`). That helps when KDE asks every time because
-it sees another app id than Kooha's: then Kooha's original token is intact.
+$XDG_RUNTIME_DIR/kooha-bench-token-<date>-<time>.bak)"`). That helps when KDE
+asks every time because it sees another app id than Kooha's: then Kooha's
+original token is intact.
+
+Before each Start the script prints whether to answer KDE's dialog: never for
+Kooha's session, which must restore without one, and right away for the
+region session. Start waits at most 30 s: then the script closes the session
+and ends without writing the token.
 
     --probe-session    Only opens and closes the session, to check whether KDE
                        accepts Kooha's token from a process that is not Kooha.
@@ -98,7 +105,7 @@ Columns:
     queue drop     frames the queues dropped: lost before videorate (source
                    frames - videorate in, the leaky capture queue) plus lost
                    after it (videorate out - frames)
-    ok <1%         "yes" when missing + queue drop stay within 1 % of the
+    ok <1%         "yes" when missing + queue drop stay under 1 % of the
                    frames requested (what videorate pushed at the requested
                    rate); "no" otherwise, or when nothing was recorded
     frames         buffers out of the encoder, up to EOS
@@ -109,6 +116,7 @@ Columns:
 """
 
 import argparse
+import itertools
 import os
 import subprocess
 import sys
@@ -142,7 +150,7 @@ KDE_REGION = "kde-region"
 STARTUP_TIMEOUT = 15
 MIN_SOURCE_SHARE = 0.9
 LOSS_LIMIT = 0.01
-TOKEN_BACKUP = "/tmp/kooha-bench-token.bak"
+START_TIMEOUT = 30
 KOOHA_SCHEMA = "io.github.seadve.Kooha"
 RESTORE_TOKEN_KEY = "screencast-restore-token"
 N_THREADS = max(1, min(os.cpu_count() or 1, 64))
@@ -153,7 +161,8 @@ CAPTURE_QUEUE = (
     "max-size-bytes=0 leaky=downstream"
 )
 ENCODER_QUEUE = (
-    "queue name=videoenc-queue max-size-buffers=30 max-size-time=0 max-size-bytes=0"
+    "queue name=videoenc-queue max-size-buffers=30 max-size-time=0 "
+    "max-size-bytes=268435456"
 )
 X264 = (
     f"videoconvert chroma-mode=none dither=none matrix-mode=output-only "
@@ -161,17 +170,18 @@ X264 = (
     f"x264enc qp-max=17 speed-preset=ultrafast threads={N_THREADS} ! "
     "capsfilter caps=video/x-h264,profile=baseline ! queue ! h264parse name=encoded"
 )
+# The constant quantizer of src/encoder.rs.
 INTEL = (
     "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! "
-    "vah264lpenc ! h264parse name=encoded"
+    "vah264lpenc rate-control=cqp qpi=17 qpp=17 qpb=17 ! h264parse name=encoded"
 )
 NVIDIA = (
     "cudaupload ! cudaconvert ! video/x-raw(memory:CUDAMemory),format=NV12 ! "
-    "nvh264enc ! h264parse name=encoded"
+    "nvh264enc rc-mode=constqp qp-const=17 ! h264parse name=encoded"
 )
 NVIDIA_GL = (
     "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! "
-    "nvh264enc ! h264parse name=encoded"
+    "nvh264enc rc-mode=constqp qp-const=17 ! h264parse name=encoded"
 )
 MUXER = "mp4mux fragment-duration=500 fragment-mode=first-moov-then-finalise"
 
@@ -351,7 +361,7 @@ class Result:
     @property
     def ok(self):
         lost = self.missing + self.queue_drop
-        return self.requested > 0 and lost <= LOSS_LIMIT * self.requested
+        return self.requested > 0 and lost < LOSS_LIMIT * self.requested
 
     def row(self):
         started = "yes" if self.started else "no"
@@ -508,7 +518,14 @@ PERSIST_UNTIL_REVOKED = 2
 CURSOR_EMBEDDED = 2
 
 
+class StartTimeout(RuntimeError):
+    """Start got no answer in time: the session is closed."""
+
+
 class Portal:
+    # Seconds Start may take, dialog included.
+    start_timeout = START_TIMEOUT
+
     def __init__(self):
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.proxy = Gio.DBusProxy.new_sync(
@@ -528,17 +545,27 @@ class Portal:
         self.counter += 1
         return f"kooha_bench_{os.getpid()}_{self.counter}"
 
-    def _request(self, method, args_format, args, options):
-        """Calls a portal method that answers through a Request object."""
+    def _request(self, method, args_format, args, options, timeout=None):
+        """Calls a portal method that answers through a Request object.
+
+        With `timeout`, raises StartTimeout when no answer comes in that many
+        seconds.
+        """
         token = self._token()
         options["handle_token"] = GLib.Variant("s", token)
         request_path = f"{PORTAL_PATH}/request/{self.sender}/{token}"
         loop = GLib.MainLoop()
         answer = {}
+        timed_out = []
 
         def on_response(_conn, _sender, _path, _iface, _signal, params):
             answer["code"], answer["results"] = params.unpack()
             loop.quit()
+
+        def on_timeout():
+            timed_out.append(True)
+            loop.quit()
+            return GLib.SOURCE_REMOVE
 
         sub = self.bus.signal_subscribe(
             PORTAL_NAME,
@@ -549,6 +576,7 @@ class Portal:
             Gio.DBusSignalFlags.NONE,
             on_response,
         )
+        deadline = None
         try:
             self.proxy.call_sync(
                 method,
@@ -557,19 +585,30 @@ class Portal:
                 -1,
                 None,
             )
-            loop.run()
+            if "code" not in answer:
+                if timeout is not None:
+                    deadline = GLib.timeout_add(int(timeout * 1000), on_timeout)
+                loop.run()
         finally:
             self.bus.signal_unsubscribe(sub)
+            if deadline is not None and not timed_out:
+                GLib.source_remove(deadline)
 
+        if timed_out:
+            raise StartTimeout(f"{method} got no answer in {timeout:g} s")
         if answer["code"] != 0:
             raise RuntimeError(f"{method} was cancelled (response {answer['code']})")
         return answer["results"]
 
-    def open(self, types, persist_mode, restore_token, on_started):
+    def open(self, types, persist_mode, restore_token, on_started, dialog_note):
         """Opens a session with one stream and returns its fd, node and size.
 
-        `on_started(results, seconds)` runs as soon as Start answers, with
-        the seconds Start took, before the PipeWire remote is opened.
+        `dialog_note` is printed right before Start, to say whether to answer
+        KDE's dialog. `on_started(results, seconds)` runs as soon as Start
+        answers, with the seconds Start took, before the PipeWire remote is
+        opened. When Start does not answer within `start_timeout`, the
+        session is closed, `on_started` never runs, and StartTimeout is
+        raised.
         """
         results = self._request(
             "CreateSession",
@@ -591,8 +630,15 @@ class Portal:
             options["restore_token"] = GLib.Variant("s", restore_token)
         self._request("SelectSources", "(oa{sv})", (self.session,), options)
 
+        print(dialog_note, flush=True)
         start = time.monotonic()
-        results = self._request("Start", "(osa{sv})", (self.session, ""), {})
+        try:
+            results = self._request(
+                "Start", "(osa{sv})", (self.session, ""), {}, self.start_timeout
+            )
+        except StartTimeout:
+            self.close()
+            raise
         on_started(results, time.monotonic() - start)
 
         streams = results["streams"]
@@ -679,16 +725,43 @@ def token_writer(write=None):
     return on_started
 
 
-def open_kooha_session(portal, args):
-    token = read_restore_token()
-    with open(TOKEN_BACKUP, "w") as f:
-        f.write(token + "\n")
-    print(f"Saved the current token to {TOKEN_BACKUP}", flush=True)
+def backup_token(token, runtime_dir=None, now=None):
+    """Saves `token` to a new file in `runtime_dir` (by default
+    $XDG_RUNTIME_DIR) named after the date and time `now`, readable only by
+    the user, and returns its path. It never writes over a file, a symlink
+    included: a second backup in the same second gets a numbered name.
+    """
+    if runtime_dir is None:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime_dir:
+        raise RuntimeError("XDG_RUNTIME_DIR is not set: no private place for the token")
+
+    stamp = time.strftime("%Y%m%d-%H%M%S", now or time.localtime())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for n in itertools.count():
+        suffix = f"-{n}" if n else ""
+        path = os.path.join(runtime_dir, f"kooha-bench-token-{stamp}{suffix}.bak")
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        return path
+
+
+def open_kooha_session(portal, _args, read=None, backup=None):
+    token = (read or read_restore_token)()
+    path = (backup or backup_token)(token)
+    print(f"Saved the current token to {path}", flush=True)
     return portal.open(
         SOURCE_MONITOR,
         PERSIST_UNTIL_REVOKED,
         token,
         token_writer(),
+        "Kooha session: do not answer a dialog. KDE should restore Kooha's "
+        "permission without one; if one shows, the token did not work, and "
+        f"the session closes in {portal.start_timeout:g} s.",
     )
 
 
@@ -696,7 +769,14 @@ def open_region_session(portal):
     def on_started(_results, seconds):
         print(f"Region session: Start answered in {seconds:.1f} s", flush=True)
 
-    return portal.open(SOURCE_MONITOR | SOURCE_VIRTUAL, PERSIST_NONE, "", on_started)
+    return portal.open(
+        SOURCE_MONITOR | SOURCE_VIRTUAL,
+        PERSIST_NONE,
+        "",
+        on_started,
+        "Region session: pick the region now, 1280x720 in KDE's dialog, "
+        f"within {portal.start_timeout:g} s.",
+    )
 
 
 def pick_monitor(monitors, stream_size):
@@ -865,6 +945,14 @@ def stop_ball_window(ball):
 
 
 def main(argv):
+    try:
+        return run(argv)
+    except StartTimeout as err:
+        print(f"{err}: closed the session and left Kooha's key as it was.", file=sys.stderr)
+        return 1
+
+
+def run(argv):
     args = parse_args(argv)
     Gst.init(None)
 

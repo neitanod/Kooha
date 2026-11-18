@@ -105,6 +105,8 @@ mod imp {
         pub(super) camera_monitor_connectors: RefCell<Vec<String>>,
         /// Set while the code, not the user, changes the camera rows.
         pub(super) updating_camera_rows: Cell<bool>,
+        /// Whether the encoder row probed the encoders.
+        pub(super) encoder_probed: Cell<bool>,
     }
 
     impl PreferencesDialog {
@@ -555,7 +557,12 @@ impl PreferencesDialog {
         ));
 
         self.update_encoder_row_visible();
+    }
 
+    /// Says in the encoder row which encoder Automatic uses. It probes the
+    /// encoders, which can wake a sleeping GPU.
+    fn probe_automatic_encoder(&self) {
+        let row = self.imp().encoder_row.get();
         glib::spawn_future_local(clone!(
             #[weak]
             row,
@@ -573,12 +580,18 @@ impl PreferencesDialog {
         ));
     }
 
+    /// Shows the encoder row only for profiles that encode H.264, and probes
+    /// the encoders the first time it shows.
     fn update_encoder_row_visible(&self) {
+        let imp = self.imp();
         let uses_h264 = self
             .settings()
             .profile()
             .is_some_and(Profile::uses_h264_encoder);
-        self.imp().encoder_row.set_visible(uses_h264);
+        imp.encoder_row.set_visible(uses_h264);
+        if uses_h264 && !imp.encoder_probed.replace(true) {
+            self.probe_automatic_encoder();
+        }
     }
 
     pub fn profile_row_grab_focus(&self) -> bool {
@@ -938,10 +951,17 @@ async fn probe_encoder(encoder: H264Encoder) -> Result<(), String> {
     encoder.works(ENCODER_PROBE_SIZE).await
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times the fake probe ran on this thread.
+    static FAKE_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Stands for the probe in tests, which never start a hardware encoder:
 /// only the CPU works.
 #[cfg(test)]
 async fn probe_encoder(encoder: H264Encoder) -> Result<(), String> {
+    FAKE_PROBES.set(FAKE_PROBES.get() + 1);
     match encoder {
         H264Encoder::Cpu => Ok(()),
         H264Encoder::Intel | H264Encoder::Nvidia => Err(format!("{encoder:?} is fake")),
@@ -1366,13 +1386,23 @@ mod tests {
         reset_camera_keys(&settings);
     }
 
+    /// Resets `profile-id` and leaves no value stored. The first reset moves
+    /// the profile row, which stores the default as the user's choice; the
+    /// second removes it. A stored value would make a later reset in another
+    /// test notify every window still alive.
+    fn reset_profile(settings: &Settings) {
+        settings.reset("profile-id");
+        settings.reset("profile-id");
+        assert!(settings.user_value("profile-id").is_none());
+    }
+
     fn encoder_dialog() -> (Settings, PreferencesDialog) {
         setup_schema();
         init_resources();
         gst::init().unwrap();
 
         let settings = Settings::default();
-        settings.reset("profile-id");
+        reset_profile(&settings);
         settings.reset("video-encoder");
         let dialog = PreferencesDialog::new(&settings);
         (settings, dialog)
@@ -1394,7 +1424,7 @@ mod tests {
             assert_eq!(row.is_visible(), visible, "{id}");
         }
 
-        settings.reset("profile-id");
+        reset_profile(&settings);
     }
 
     #[gtk::test]
@@ -1412,13 +1442,14 @@ mod tests {
         settings.reset("video-encoder");
     }
 
-    #[gtk::test]
-    fn encoder_row_says_what_automatic_uses() {
-        let _lock = settings_lock();
-        let (settings, dialog) = encoder_dialog();
-        let row = dialog.imp().encoder_row.get();
+    /// Runs the main context until nothing is pending.
+    fn drain_main_context() {
+        let context = glib::MainContext::default();
+        while context.iteration(false) {}
+    }
 
-        // The fake probe only passes the CPU.
+    /// Waits at most five seconds for `row` to have a subtitle.
+    fn wait_for_subtitle(row: &adw::ComboRow) {
         let context = glib::MainContext::default();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while row.subtitle().is_none_or(|subtitle| subtitle.is_empty())
@@ -1426,8 +1457,51 @@ mod tests {
         {
             context.iteration(false);
         }
+    }
+
+    #[gtk::test]
+    fn encoder_row_says_what_automatic_uses() {
+        let _lock = settings_lock();
+        let (settings, dialog) = encoder_dialog();
+        settings.set_profile(Some(Profile::from_id("mp4").unwrap()));
+        let row = dialog.imp().encoder_row.get();
+
+        // The fake probe only passes the CPU.
+        wait_for_subtitle(&row);
         assert_eq!(row.subtitle().as_deref(), Some("Automatic uses CPU"));
 
+        reset_profile(&settings);
+        settings.reset("video-encoder");
+    }
+
+    #[gtk::test]
+    fn encoder_row_probes_only_once_visible() {
+        let _lock = settings_lock();
+        setup_schema();
+        drain_main_context();
+        let probes_before = FAKE_PROBES.get();
+
+        let (settings, dialog) = encoder_dialog();
+        settings.set_profile(Some(Profile::from_id("webm-vp8").unwrap()));
+        let row = dialog.imp().encoder_row.get();
+        drain_main_context();
+        assert!(!row.is_visible());
+        assert_eq!(FAKE_PROBES.get(), probes_before);
+        assert!(row.subtitle().is_none_or(|subtitle| subtitle.is_empty()));
+
+        settings.set_profile(Some(Profile::from_id("mp4").unwrap()));
+        wait_for_subtitle(&row);
+        assert_eq!(row.subtitle().as_deref(), Some("Automatic uses CPU"));
+        let probes = FAKE_PROBES.get() - probes_before;
+        assert_eq!(probes, encoder::AUTO_ORDER.len());
+
+        // Hiding and showing it again does not probe again.
+        settings.set_profile(Some(Profile::from_id("gif").unwrap()));
+        settings.set_profile(Some(Profile::from_id("matroska-h264").unwrap()));
+        drain_main_context();
+        assert_eq!(FAKE_PROBES.get() - probes_before, probes);
+
+        reset_profile(&settings);
         settings.reset("video-encoder");
     }
 
