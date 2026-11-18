@@ -308,6 +308,9 @@ impl Window {
         // action (codex code r1 #3, fable code r1 #2).
         if !self.enabled_actions().mark_area {
             tracing::debug!("Marking is disabled now");
+            if let Some(notice) = mark_refused_notice(imp.recording.borrow().is_some()) {
+                self.add_toast(adw::Toast::new(&notice));
+            }
             return None;
         }
         if imp.marking.replace(true) {
@@ -1320,6 +1323,12 @@ impl Window {
     }
 }
 
+/// The toast when marking is disabled, if any: during a recording, how to
+/// mark. While another marking is open, nothing: it is on screen.
+fn mark_refused_notice(has_recording: bool) -> Option<String> {
+    has_recording.then(|| gettext("Stop the recording to mark an area"))
+}
+
 /// The toast when a saved area marked again was removed or renamed
 /// meanwhile.
 fn missing_area_notice(name: &str) -> String {
@@ -1928,6 +1937,18 @@ mod tests {
         assert!(store.areas().is_empty());
         assert_eq!(store.last(), Some(area(200)));
         assert_eq!(store.selected(), Some(Selected::Last));
+    }
+
+    #[test]
+    fn marking_during_a_recording_tells_how_to_mark() {
+        // The «Mark Again» button of a toast, ignored silently before
+        // (fable code r2 #6).
+        assert_eq!(
+            mark_refused_notice(true).as_deref(),
+            Some("Stop the recording to mark an area")
+        );
+        // Another marking is open: it is on screen already.
+        assert_eq!(mark_refused_notice(false), None);
     }
 
     #[test]
