@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="KoohaAreasWindow" parent="AdwWindow">
+    <property name="title" translatable="yes">Areas</property>
+    <property name="default-width">560</property>
+    <property name="default-height">460</property>
+    <property name="modal">False</property>
+    <property name="hide-on-close">True</property>
+    <property name="destroy-with-parent">True</property>
+    <property name="content">
+      <object class="AdwToolbarView">
+        <child type="top">
+          <object class="AdwHeaderBar"/>
+        </child>
+        <property name="content">
+          <object class="GtkStack" id="stack">
+            <child>
+              <object class="GtkStackPage">
+                <property name="name">empty</property>
+                <property name="child">
+                  <object class="AdwStatusPage">
+                    <property name="icon-name">selection-symbolic</property>
+                    <property name="title" translatable="yes">No Saved Areas</property>
+                    <property name="description" translatable="yes">Mark an area and save it with a name to see it here.</property>
+                    <property name="child">
+                      <object class="GtkButton">
+                        <property name="name">mark-area</property>
+                        <property name="label" translatable="yes">Mark Area</property>
+                        <property name="halign">center</property>
+                        <signal name="clicked" handler="mark_new_area" swapped="yes"/>
+                        <style>
+                          <class name="pill"/>
+                          <class name="suggested-action"/>
+                        </style>
+                      </object>
+                    </property>
+                  </object>
+                </property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkStackPage">
+                <property name="name">list</property>
+                <property name="child">
+                  <object class="GtkScrolledWindow">
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="child">
+                      <object class="AdwClamp">
+                        <property name="margin-top">12</property>
+                        <property name="margin-bottom">12</property>
+                        <property name="margin-start">12</property>
+                        <property name="margin-end">12</property>
+                        <property name="child">
+                          <object class="GtkListBox" id="list_box">
+                            <property name="valign">start</property>
+                            <property name="selection-mode">none</property>
+                            <style>
+                              <class name="boxed-list"/>
+                            </style>
+                          </object>
+                        </property>
+                      </object>
+                    </property>
+                  </object>
+                </property>
+              </object>
+            </child>
+          </object>
+        </property>
+        <child type="bottom">
+          <object class="GtkLabel" id="footer_label">
+            <property name="margin-top">6</property>
+            <property name="margin-bottom">6</property>
+            <property name="margin-start">12</property>
+            <property name="margin-end">12</property>
+            <property name="wrap">True</property>
+            <property name="wrap-mode">word-char</property>
+            <property name="selectable">True</property>
+            <property name="justify">center</property>
+            <style>
+              <class name="dim-label"/>
+              <class name="caption"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </property>
+  </template>
+</interface>
