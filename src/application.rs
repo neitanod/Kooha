@@ -8,7 +8,7 @@ use gtk::{
 
 use crate::{
     about,
-    areas::{self, AreaStore},
+    areas::{self, AreaStore, MarkedArea, MonitorInfo},
     areas_window::AreasWindow,
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
@@ -16,6 +16,7 @@ use crate::{
     doctor::dialog::RequirementsDialog,
     format, overlay,
     preferences_dialog::PreferencesDialog,
+    recording::needs_marking,
     settings::{CaptureMode, Settings},
     tray::{
         TrayCommand, TrayModel, TrayRequest, TrayService,
@@ -346,13 +347,20 @@ impl Application {
 
         match command {
             TrayCommand::ToggleRecord => {
+                let chosen = self.area_store().selected_area();
+                let monitors = gdk::Display::default()
+                    .map(|display| areas::monitors::current(&display))
+                    .unwrap_or_default();
                 if tray_record_presents_window(
                     self.has_recording(),
                     self.settings().capture_mode(),
                     overlay::availability().is_ok(),
+                    chosen.as_ref().map(|chosen| &chosen.area),
+                    &monitors,
                 ) {
-                    // The marking and the notices go on the window, which
-                    // may be minimized (codex code r1 #7, fable code r1 #8).
+                    // The marking and the toast of an area out of date go on
+                    // the window, which may be minimized (codex code r1 #7,
+                    // fable code r1 #8).
                     self.present_window(activation_token.as_deref());
                 }
                 if let Err(err) =
@@ -584,15 +592,24 @@ fn tray_model(
     }
 }
 
-/// Whether «Start Recording» in the tray brings the window first: when it
-/// starts a recording in Selection mode with layers, which may mark an
-/// area or tell which monitor to share, on the window.
+/// Whether «Start Recording» in the tray brings the window first: when the
+/// recording needs it, to mark an area as none is `chosen`, or to offer to
+/// mark the chosen one again as it is out of date for `monitors`. Else the
+/// window would be in front of what is recorded (fable code r2 #1); the
+/// notice of which monitor to share is also a desktop notification.
 fn tray_record_presents_window(
     has_recording: bool,
     mode: CaptureMode,
     overlays_available: bool,
+    chosen: Option<&MarkedArea>,
+    monitors: &[MonitorInfo],
 ) -> bool {
-    !has_recording && mode == CaptureMode::Selection && overlays_available
+    if has_recording {
+        return false;
+    }
+    let is_stale = || chosen.is_some_and(|area| area.staleness(monitors).is_some());
+    needs_marking(mode, overlays_available, chosen.is_some())
+        || (mode == CaptureMode::Selection && overlays_available && is_stale())
 }
 
 /// Whether the window's recording `snapshot` is past idle: from the portal
@@ -842,13 +859,31 @@ mod tests {
     fn tray_record_presents_the_window_for_a_selection() {
         use CaptureMode::{MonitorWindow, Selection};
 
-        // Starting in Selection mode may mark an area or tell which monitor
-        // to choose, on the window.
-        assert!(tray_record_presents_window(false, Selection, true));
+        let current = area();
+        let mut stale = area();
+        stale.connector = "HDMI-1".into();
+        let monitors = [crate::areas::MonitorInfo {
+            connector: "DP-3".into(),
+            logical: (0, 0, 1600, 1000),
+            scale: 1.05,
+        }];
+        let presents = |has_recording, mode, overlays, chosen: Option<&MarkedArea>| {
+            tray_record_presents_window(has_recording, mode, overlays, chosen, &monitors)
+        };
+
+        // Starting in Selection mode with no area marks one, on the window.
+        assert!(presents(false, Selection, true, None));
+        // An area out of date offers to mark it again, on the window.
+        assert!(presents(false, Selection, true, Some(&stale)));
+        // An area up to date records at once: the window would be in front
+        // of what is recorded, and a notification tells which monitor to
+        // choose (fable code r2 #1).
+        assert!(!presents(false, Selection, true, Some(&current)));
         // Stopping, the upstream selector or a whole monitor show nothing.
-        assert!(!tray_record_presents_window(true, Selection, true));
-        assert!(!tray_record_presents_window(false, Selection, false));
-        assert!(!tray_record_presents_window(false, MonitorWindow, true));
+        assert!(!presents(true, Selection, true, None));
+        assert!(!presents(false, Selection, false, None));
+        assert!(!presents(false, MonitorWindow, true, None));
+        assert!(!presents(false, MonitorWindow, true, Some(&stale)));
     }
 
     #[gtk::test]
