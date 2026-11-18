@@ -703,9 +703,11 @@ mod tests {
             CaptureWarnings::default(),
         ));
 
-        // A recording that began before the window opened.
-        app.update_tray(recording);
+        // The main window publishes its own state to the tray whenever it
+        // updates, so the snapshots below go after both windows exist.
         let window = app.areas_window();
+
+        app.update_tray(recording);
         assert!(window.is_recording());
 
         app.update_tray(None);
