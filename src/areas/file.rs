@@ -79,6 +79,9 @@ pub enum LoadError {
     Io(io::Error),
     /// The file was written by a newer Kooha, and was left untouched.
     UnsupportedVersion(u32),
+    /// The file was unreadable or invalid, and was left as it is: without
+    /// the lock, another Kooha may be moving it aside and saving a good one.
+    LeftUnreadable(String),
 }
 
 impl fmt::Display for LoadError {
@@ -90,6 +93,12 @@ impl fmt::Display for LoadError {
             Self::Io(err) => write!(f, "Broken areas file that couldn't be moved: {err}"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "Areas file of the newer version {version}")
+            }
+            Self::LeftUnreadable(reason) => {
+                write!(
+                    f,
+                    "Broken areas file, left in place without its lock: {reason}"
+                )
             }
         }
     }
@@ -125,21 +134,28 @@ pub fn path() -> PathBuf {
 /// `rectangles.json.broken-<YYYYMMDD-HHMMSS>` so that the next save
 /// doesn't overwrite it. A file of a newer version is left as it is.
 pub fn load(path: &Path) -> Result<AreasFile, LoadError> {
+    match read(path) {
+        Err(LoadError::LeftUnreadable(reason)) => {
+            tracing::warn!("Failed to load `{}`: {}", path.display(), reason);
+            let moved_to = with_suffix(path, &format!(".broken-{}", timestamp()));
+            fs::rename(path, &moved_to).map_err(LoadError::Io)?;
+            Err(LoadError::Broken { moved_to })
+        }
+        other => other,
+    }
+}
+
+/// Reads the areas file at `path` like `load()`, but changes nothing on
+/// disk: an unreadable or invalid file is `LeftUnreadable`. For a caller
+/// without the lock of the file.
+pub fn read(path: &Path) -> Result<AreasFile, LoadError> {
     let parsed = match fs::read(path) {
         Ok(bytes) => parse(&bytes)?,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(AreasFile::default()),
         Err(err) => Err(err.to_string()),
     };
 
-    match parsed {
-        Ok(file) => Ok(file),
-        Err(reason) => {
-            tracing::warn!("Failed to load `{}`: {}", path.display(), reason);
-            let moved_to = with_suffix(path, &format!(".broken-{}", timestamp()));
-            fs::rename(path, &moved_to).map_err(LoadError::Io)?;
-            Err(LoadError::Broken { moved_to })
-        }
-    }
+    parsed.map_err(LoadError::LeftUnreadable)
 }
 
 /// Parses the file, or tells why it is broken. Checks the version first,
@@ -292,6 +308,20 @@ mod tests {
             monitor_height: 1050,
             scale: 1.05,
         }
+    }
+
+    #[test]
+    fn read_leaves_a_broken_file_where_it_is() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ not json").unwrap();
+
+        let Err(LoadError::LeftUnreadable(_)) = read(&path) else {
+            panic!("A broken file should be unreadable");
+        };
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
     }
 
     fn sample() -> AreasFile {

@@ -191,7 +191,14 @@ impl AreaStore {
                 );
             })
             .ok();
-        match file::load(&path) {
+        // Without the lock, nothing on disk changes: a broken file stays
+        // where it is (codex code r4 #1).
+        let loaded = if lock.is_some() {
+            file::load(&path)
+        } else {
+            file::read(&path)
+        };
+        match loaded {
             Ok(file) => {
                 imp.file.replace(file);
                 #[cfg(test)]
@@ -1007,6 +1014,33 @@ mod tests {
         assert_eq!(store.selected(), named("Demo"));
         assert_eq!(failed.borrow().len(), 2);
         assert_eq!(fs::read_to_string(&path).unwrap(), on_disk);
+    }
+
+    /// Without the lock, a broken file is left in place: another Kooha
+    /// may be moving it aside and saving a good one (codex code r4 #1).
+    #[test]
+    fn a_broken_file_is_not_moved_without_the_lock() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ not json").unwrap();
+        let held = FileLock::acquire(&path).unwrap();
+
+        let store = AreaStore::with_path(path.clone());
+        drop(held);
+
+        assert!(store.is_read_only());
+        assert!(matches!(
+            store.load_notice(),
+            Some(LoadError::LeftUnreadable(_))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
+        let siblings = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".broken-"))
+            .count();
+        assert_eq!(siblings, 0);
     }
 
     #[test]

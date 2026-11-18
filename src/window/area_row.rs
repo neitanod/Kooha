@@ -122,6 +122,9 @@ pub fn notice_for_load_error(err: &LoadError) -> String {
         LoadError::UnsupportedVersion(_) => {
             gettext("The list of areas was written by a newer Kooha; changes won't be saved")
         }
+        LoadError::LeftUnreadable(_) => gettext(
+            "The list of areas is unreadable and in use by another Kooha; changes won't be saved",
+        ),
     }
 }
 
@@ -378,6 +381,14 @@ mod tests {
         assert_eq!(
             notice_for_load_error(&LoadError::Io(io::Error::other("denied"))),
             "Couldn't read the list of areas: denied"
+        );
+    }
+
+    #[test]
+    fn locked_unreadable_file_notice_says_changes_are_not_saved() {
+        assert_eq!(
+            notice_for_load_error(&LoadError::LeftUnreadable("bad".into())),
+            "The list of areas is unreadable and in use by another Kooha; changes won't be saved"
         );
     }
 
