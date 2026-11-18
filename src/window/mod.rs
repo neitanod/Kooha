@@ -35,7 +35,9 @@ use crate::{
     help::ContextWithHelp,
     overlay,
     preferences_dialog::PreferencesDialog,
-    recording::{NoProfileError, Recording, RecordingState},
+    recording::{
+        NoProfileError, Recording, RecordingState, StaleArea, WrongMonitor, needs_marking,
+    },
     settings::CaptureMode,
 };
 
@@ -587,6 +589,17 @@ impl Window {
             return;
         }
 
+        // In Selection mode with no area chosen, mark one first (P1).
+        let has_area = Application::get().area_store().selected_area().is_some();
+        if needs_marking(
+            Application::get().settings().capture_mode(),
+            overlay::availability().is_ok(),
+            has_area,
+        ) && self.mark_area(MarkTarget::New).await.is_none()
+        {
+            return;
+        }
+
         let recording = Recording::new();
         imp.warnings_notifier.reset();
         let handler_ids = vec![
@@ -636,6 +649,13 @@ impl Window {
                 self,
                 move |recording, res| {
                     obj.handle_recording_finished(recording, res);
+                }
+            )),
+            recording.connect_notice(clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_, message| {
+                    obj.add_toast(adw::Toast::new(message));
                 }
             )),
         ];
@@ -720,6 +740,16 @@ impl Window {
                     tracing::debug!("{:?}", err);
                 } else if err.is::<NoProfileError>() {
                     self.present_no_profile_error_dialog();
+                } else if let Some(stale) = err.downcast_ref::<StaleArea>() {
+                    tracing::debug!("{:?}", err);
+                    // The toast is on the window, which may be minimized if
+                    // the recording started from the tray.
+                    self.present();
+                    self.add_toast(self.stale_area_toast(stale));
+                } else if let Some(wrong) = err.downcast_ref::<WrongMonitor>() {
+                    tracing::debug!("{:?}", err);
+                    self.present();
+                    self.add_toast(adw::Toast::new(&wrong.to_string()));
                 } else {
                     tracing::error!("{:?}", err);
 
@@ -742,6 +772,32 @@ impl Window {
         } else {
             tracing::warn!("Recording finished but no stored recording");
         }
+    }
+
+    /// «The area “Demo” is out of date: DP-3 is not connected», with a
+    /// button to mark it again.
+    fn stale_area_toast(&self, stale: &StaleArea) -> adw::Toast {
+        let toast = adw::Toast::builder()
+            .title(stale.message())
+            .button_label(gettext("Mark Again"))
+            .timeout(0)
+            .build();
+        let target = stale_area_target(stale);
+        toast.connect_button_clicked(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                let target = target.clone();
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    obj,
+                    async move {
+                        obj.mark_area(target).await;
+                    }
+                ));
+            }
+        ));
+        toast
     }
 
     fn update_inhibit(&self) {
@@ -1175,6 +1231,15 @@ impl Window {
     }
 }
 
+/// A saved area out of date is marked again with its name; the last area
+/// is marked anew.
+fn stale_area_target(stale: &StaleArea) -> MarkTarget {
+    stale
+        .name
+        .clone()
+        .map_or(MarkTarget::New, MarkTarget::Replace)
+}
+
 /// The connected monitors, or none without a display.
 fn current_monitors() -> Vec<areas::MonitorInfo> {
     gdk::Display::default()
@@ -1243,6 +1308,37 @@ mod tests {
     #[gtk::test]
     fn no_warning_chips_without_warnings() {
         assert!(warning_chips(CaptureWarnings::default()).is_empty());
+    }
+
+    #[test]
+    fn stale_area_is_marked_again_by_name() {
+        let stale = |name: Option<&str>| StaleArea {
+            name: name.map(String::from),
+            reason: "DP-3 is not connected".into(),
+        };
+        assert_eq!(
+            stale_area_target(&stale(Some("Demo"))),
+            MarkTarget::Replace("Demo".into())
+        );
+        assert_eq!(stale_area_target(&stale(None)), MarkTarget::New);
+    }
+
+    #[gtk::test]
+    fn stale_area_toast_offers_to_mark_again() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+
+        let toast = window.stale_area_toast(&StaleArea {
+            name: Some("Demo".into()),
+            reason: "DP-3 is not connected".into(),
+        });
+
+        assert_eq!(
+            toast.title().as_deref(),
+            Some("The area “Demo” is out of date: DP-3 is not connected")
+        );
+        assert_eq!(toast.button_label().as_deref(), Some("Mark Again"));
+        assert_eq!(toast.timeout(), 0);
     }
 
     /// The border is built, never presented.

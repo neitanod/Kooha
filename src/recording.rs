@@ -24,13 +24,15 @@ use crate::{
     application::Application,
     area_border::{self, geometry::BorderGeometry},
     area_selector::AreaSelector,
+    areas::{self, ChosenArea, MarkedArea, MonitorInfo},
     cancelled::Cancelled,
     capture_warnings::CaptureWarnings,
     experimental::Feature,
     help::ContextWithHelp,
     i18n::gettext_f,
+    overlay,
     pause_gate::{FlashColor, PauseGate},
-    pipeline::{PipelineBuilder, compute_crop},
+    pipeline::{AreaCrop, PipelineBuilder, compute_crop},
     profile::Profile,
     screencast_portal::{
         CursorMode, PersistMode, Proxy, Session, SourceType, Stream, WindowIdentifier,
@@ -67,10 +69,13 @@ pub struct CaptureConfig {
     pub saving_location: PathBuf,
     pub pause_flash: bool,
     pub pause_flash_color: FlashColor,
+    /// The area to record without the upstream selector, from
+    /// `area_to_record`.
+    pub area: Option<ChosenArea>,
 }
 
 impl CaptureConfig {
-    pub fn from_settings(settings: &Settings) -> Result<Self> {
+    pub fn from_settings(settings: &Settings, area: Option<ChosenArea>) -> Result<Self> {
         Ok(Self {
             profile: settings.profile().context(NoProfileError)?,
             record_desktop_audio: settings.record_desktop_audio(),
@@ -82,6 +87,7 @@ impl CaptureConfig {
             saving_location: settings.saving_location(),
             pause_flash: settings.pause_flash(),
             pause_flash_color: settings.pause_flash_color().into(),
+            area,
         })
     }
 
@@ -93,6 +99,208 @@ impl CaptureConfig {
             self.show_pointer,
         )
     }
+}
+
+/// Whether recording in `mode` has to mark an area first: in Selection mode
+/// with the marker's layers available, when no area is chosen. Without
+/// layers, the upstream selector picks the area (ADR 0004).
+pub fn needs_marking(mode: CaptureMode, overlays_available: bool, has_area: bool) -> bool {
+    mode == CaptureMode::Selection && overlays_available && !has_area
+}
+
+/// The area to record: the `chosen` one in Selection mode with the
+/// marker's layers available, else none and the upstream selector.
+pub fn area_to_record(
+    mode: CaptureMode,
+    overlays_available: bool,
+    chosen: impl FnOnce() -> Option<ChosenArea>,
+) -> Option<ChosenArea> {
+    if mode == CaptureMode::Selection && overlays_available {
+        chosen()
+    } else {
+        None
+    }
+}
+
+/// The chosen area is out of date: its monitor is gone or changed (P10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaleArea {
+    /// `None` for the last area, which has no name.
+    pub name: Option<String>,
+    /// Why, like `DP-3 is not connected`.
+    pub reason: String,
+}
+
+impl StaleArea {
+    /// What the toast says: the heading and the reason.
+    pub fn message(&self) -> String {
+        format!("{self}: {}", self.reason)
+    }
+}
+
+impl fmt::Display for StaleArea {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            Some(name) => f.write_str(&gettext_f(
+                "The area “{name}” is out of date",
+                &[("name", name)],
+            )),
+            None => f.write_str(&gettext("The last area is out of date")),
+        }
+    }
+}
+
+impl error::Error for StaleArea {}
+
+/// The stream shared is not the monitor of the area, twice (P9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrongMonitor {
+    /// The size of the stream, if a single one with a size was shared.
+    pub shared: Option<(i32, i32)>,
+    pub connector: String,
+    /// The physical size of the area's monitor.
+    pub monitor: (i32, i32),
+}
+
+impl fmt::Display for WrongMonitor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (monitor_width, monitor_height) = self.monitor;
+        let monitor = format!("{monitor_width}×{monitor_height}");
+        let message = match self.shared {
+            Some((width, height)) => gettext_f(
+                "You shared {shared}, but the area is on {connector} ({monitor})",
+                &[
+                    ("shared", &format!("{width}×{height}")),
+                    ("connector", &self.connector),
+                    ("monitor", &monitor),
+                ],
+            ),
+            None => gettext_f(
+                "You shared more than one screen, but the area is on {connector} ({monitor})",
+                &[("connector", &self.connector), ("monitor", &monitor)],
+            ),
+        };
+        f.write_str(&message)
+    }
+}
+
+impl error::Error for WrongMonitor {}
+
+/// How far, per axis, a stream may be from a physical monitor size: logical
+/// sizes times a fractional scale round differently.
+const STREAM_SIZE_TOLERANCE: i32 = 2;
+
+/// How far, per axis, a stream may be from a logical monitor size.
+const LOGICAL_SIZE_TOLERANCE: i32 = 1;
+
+/// How a whole-monitor stream relates to the monitor of the area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamMatch {
+    /// The stream is the area's monitor.
+    Same,
+    /// Another monitor, of `shared` size, or more than one stream.
+    Other { shared: Option<(i32, i32)> },
+    /// The stream doesn't say its size.
+    Unknown,
+}
+
+/// Whether `streams` capture the monitor of `area`, by size (ADR 0005): the
+/// physical size the area was marked on, ±2, or the logical size of that
+/// monitor among `monitors`, ±1, as the portal spec says.
+pub(crate) fn match_stream(
+    streams: &[Stream],
+    area: &MarkedArea,
+    monitors: &[MonitorInfo],
+) -> StreamMatch {
+    let [stream] = streams else {
+        return StreamMatch::Other { shared: None };
+    };
+    let Some(size) = stream.size() else {
+        tracing::warn!("The stream doesn't say its size; assuming it is the area's monitor");
+        return StreamMatch::Unknown;
+    };
+
+    let near = |a: (i32, i32), b: (i32, i32), tolerance: i32| {
+        (a.0 - b.0).abs() <= tolerance && (a.1 - b.1).abs() <= tolerance
+    };
+    let matches = |monitor: &MonitorInfo| {
+        let (_, _, width, height) = monitor.logical;
+        near(size, monitor.physical_size(), STREAM_SIZE_TOLERANCE)
+            || near(size, (width, height), LOGICAL_SIZE_TOLERANCE)
+    };
+
+    let marked_on = (area.monitor_width, area.monitor_height);
+    let own = monitors
+        .iter()
+        .find(|monitor| monitor.connector == area.connector);
+    if !near(size, marked_on, STREAM_SIZE_TOLERANCE) && !own.is_some_and(matches) {
+        return StreamMatch::Other { shared: Some(size) };
+    }
+
+    // Monitors of the same size can't be told apart (ADR 0005).
+    if monitors
+        .iter()
+        .any(|monitor| monitor.connector != area.connector && matches(monitor))
+    {
+        tracing::warn!(
+            ?size,
+            connector = area.connector,
+            "Another monitor has the size of the stream; assuming the area's"
+        );
+    }
+    StreamMatch::Same
+}
+
+/// Opens a screencast session for `area`: if the shared stream is another
+/// monitor, closes that session, forgets the restore token, tells the user
+/// which monitor to choose with `notice`, and opens a second one without
+/// the token. A second mismatch is a `WrongMonitor` error. The restore
+/// token is saved with `save_token` only for a session that is kept.
+///
+/// `open` and `close` stand for the portal, so that tests need no D-Bus.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn open_session_for_area<S, OpenFut, CloseFut>(
+    restore_token: Option<String>,
+    area: &MarkedArea,
+    monitors: &[MonitorInfo],
+    open: impl Fn(Option<String>) -> OpenFut,
+    close: impl Fn(S) -> CloseFut,
+    forget_token: impl Fn(),
+    notice: impl Fn(String),
+    save_token: impl Fn(Option<String>),
+) -> Result<(S, Vec<Stream>)>
+where
+    OpenFut: Future<Output = Result<(S, Vec<Stream>, Option<String>)>>,
+    CloseFut: Future<Output = ()>,
+{
+    let (mut session, mut streams, mut new_token) = open(restore_token).await?;
+
+    if let StreamMatch::Other { .. } = match_stream(&streams, area, monitors) {
+        tracing::debug!(
+            ?streams,
+            "The shared stream is not the area's monitor; asking again"
+        );
+        close(session).await;
+        forget_token();
+        notice(gettext_f(
+            "Choose {connector} (whole screen) in the sharing dialog",
+            &[("connector", &area.connector)],
+        ));
+
+        (session, streams, new_token) = open(None).await?;
+        if let StreamMatch::Other { shared } = match_stream(&streams, area, monitors) {
+            close(session).await;
+            return Err(WrongMonitor {
+                shared,
+                connector: area.connector.clone(),
+                monitor: (area.monitor_width, area.monitor_height),
+            }
+            .into());
+        }
+    }
+
+    save_token(new_token);
+    Ok((session, streams))
 }
 
 /// Runs right before the capture begins: before the countdown or, without
@@ -195,6 +403,9 @@ mod imp {
                     Signal::builder("finished")
                         .param_types([BoxedResult::static_type()])
                         .build(),
+                    Signal::builder("notice")
+                        .param_types([String::static_type()])
+                        .build(),
                 ]
             });
 
@@ -244,44 +455,89 @@ impl Recording {
         settings: &Settings,
     ) -> Result<()> {
         let imp = self.imp();
-        let config = CaptureConfig::from_settings(settings)?;
+        let area = area_to_record(
+            settings.capture_mode(),
+            overlay::availability().is_ok(),
+            || Application::get().area_store().selected_area(),
+        );
+        let config = CaptureConfig::from_settings(settings, area)?;
 
         imp.capture_warnings.set(config.warnings());
         self.notify_capture_warnings();
 
+        let monitors = gdk::Display::default()
+            .map(|display| areas::monitors::current(&display))
+            .unwrap_or_default();
+        if let Some(chosen) = &config.area
+            && let Some(staleness) = chosen.area.staleness(&monitors)
+        {
+            return Err(StaleArea {
+                name: chosen.name.clone(),
+                reason: staleness.describe(&chosen.area.connector),
+            }
+            .into());
+        }
+
         // Setup screencast session
+        let cursor_mode = if config.show_pointer {
+            CursorMode::EMBEDDED
+        } else {
+            CursorMode::HIDDEN
+        };
         let restore_token = settings.screencast_restore_token();
         settings.reset_screencast_restore_token();
-        let (screencast_session, streams, restore_token, fd) = new_screencast_session(
-            if config.show_pointer {
-                CursorMode::EMBEDDED
-            } else {
-                CursorMode::HIDDEN
-            },
-            if Feature::WindowRecording.is_enabled() {
-                SourceType::MONITOR | SourceType::WINDOW
-            } else {
-                SourceType::MONITOR
-            },
-            Feature::MultipleVideoSources.is_enabled(),
-            Some(&restore_token),
-            PersistMode::Persistent,
-            parent,
-        )
-        .await
-        .with_context(|| {
-            ContextWithHelp::new(
-                gettext("Failed to start recording"),
-                gettext_f(
-                    // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-                    "Check out {link} for help.",
-                    &[("link", r#"<a href="https://github.com/SeaDve/Kooha#-it-doesnt-work">It Doesn't Work page</a>"#)],
-                ),
+        let (screencast_session, streams, fd) = if let Some(chosen) = &config.area {
+            // A whole monitor, the area's (P9).
+            let ((session, fd), streams) = open_session_for_area(
+                Some(restore_token),
+                &chosen.area,
+                &monitors,
+                |restore_token| async move {
+                    let (session, streams, restore_token, fd) = new_screencast_session(
+                        cursor_mode,
+                        SourceType::MONITOR,
+                        false,
+                        restore_token.as_deref(),
+                        PersistMode::Persistent,
+                        parent,
+                    )
+                    .await
+                    .with_context(failed_to_start_help)?;
+                    Ok(((session, fd), streams, restore_token))
+                },
+                |(session, _fd): (Session, OwnedFd)| async move {
+                    if let Err(err) = session.close().await {
+                        tracing::warn!("Failed to close screencast session: {:?}", err);
+                    }
+                },
+                || settings.reset_screencast_restore_token(),
+                |message| self.emit_notice(&message),
+                |restore_token| {
+                    settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
+                },
             )
-        })?;
+            .await?;
+            (session, streams, fd)
+        } else {
+            let (session, streams, restore_token, fd) = new_screencast_session(
+                cursor_mode,
+                if Feature::WindowRecording.is_enabled() {
+                    SourceType::MONITOR | SourceType::WINDOW
+                } else {
+                    SourceType::MONITOR
+                },
+                Feature::MultipleVideoSources.is_enabled(),
+                Some(&restore_token),
+                PersistMode::Persistent,
+                parent,
+            )
+            .await
+            .with_context(failed_to_start_help)?;
+            settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
+            (session, streams, fd)
+        };
 
         imp.session.replace(Some(screencast_session));
-        settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
 
         let file_path =
             new_recording_path(&config.saving_location, config.profile.file_extension());
@@ -298,7 +554,18 @@ impl Recording {
         );
 
         // Select area
-        if config.capture_mode == CaptureMode::Selection {
+        if let Some(chosen) = &config.area {
+            let area = &chosen.area;
+            pipeline_builder.area_crop(AreaCrop {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: area.height,
+                expected_frame: (area.monitor_width, area.monitor_height),
+            });
+            imp.area_border
+                .replace(area_border::for_area(area, &monitors));
+        } else if config.capture_mode == CaptureMode::Selection {
             let data = AreaSelector::select(raw_fd, &streams, &Application::get().window()).await?;
             imp.area_border
                 .replace(area_border::for_streams(&streams, compute_crop(&data)));
@@ -506,6 +773,24 @@ impl Recording {
                 f(obj, &result.0);
             }),
         )
+    }
+
+    /// Something the user must know while the recording starts, as a toast.
+    pub fn connect_notice<F>(&self, f: F) -> glib::SignalHandlerId
+    where
+        F: Fn(&Self, &str) + 'static,
+    {
+        self.connect_closure(
+            "notice",
+            false,
+            closure_local!(|obj: &Self, message: String| {
+                f(obj, &message);
+            }),
+        )
+    }
+
+    fn emit_notice(&self, message: &str) {
+        self.emit_by_name::<()>("notice", &[&message]);
     }
 
     fn set_state(&self, state: RecordingState) {
@@ -738,6 +1023,21 @@ impl Recording {
     }
 }
 
+/// Help for a screencast session that failed to start.
+fn failed_to_start_help() -> ContextWithHelp {
+    ContextWithHelp::new(
+        gettext("Failed to start recording"),
+        gettext_f(
+            // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+            "Check out {link} for help.",
+            &[(
+                "link",
+                r#"<a href="https://github.com/SeaDve/Kooha#-it-doesnt-work">It Doesn't Work page</a>"#,
+            )],
+        ),
+    )
+}
+
 async fn new_screencast_session(
     cursor_mode: CursorMode,
     source_type: SourceType,
@@ -831,8 +1131,9 @@ mod tests {
 
     use std::env;
 
-    use crate::settings::test_utils::{
-        init_resources, settings_lock, setup_schema, temp_saving_location,
+    use crate::{
+        areas::model::test_monitors::{dp3, edp, hdmi},
+        settings::test_utils::{init_resources, settings_lock, setup_schema, temp_saving_location},
     };
 
     #[test]
@@ -857,7 +1158,7 @@ mod tests {
         settings.set_record_microphone(false);
         settings.set_pause_flash(true);
 
-        let config = CaptureConfig::from_settings(&settings).unwrap();
+        let config = CaptureConfig::from_settings(&settings, None).unwrap();
         settings.set_record_microphone(true);
         settings.set_pause_flash(false);
 
@@ -868,6 +1169,321 @@ mod tests {
 
         settings.reset("saving-location");
         settings.reset("pause-flash");
+    }
+
+    fn area_on(connector: &str, monitor: (i32, i32), scale: f64) -> MarkedArea {
+        MarkedArea {
+            connector: connector.into(),
+            x: 100,
+            y: 80,
+            width: 640,
+            height: 480,
+            monitor_width: monitor.0,
+            monitor_height: monitor.1,
+            scale,
+        }
+    }
+
+    fn on_dp3() -> MarkedArea {
+        area_on("DP-3", (1680, 1050), 1.05)
+    }
+
+    fn on_edp() -> MarkedArea {
+        area_on("eDP-1", (2560, 1600), 1.75)
+    }
+
+    fn monitors() -> Vec<MonitorInfo> {
+        vec![hdmi(), edp(), dp3()]
+    }
+
+    /// A stream as KDE's portal sends it: a size and no position.
+    fn stream(node_id: u32, size: Option<(i32, i32)>) -> Stream {
+        let size = size.map_or_else(String::new, |(width, height)| {
+            format!(", 'size': <({width}, {height})>")
+        });
+        let text = format!("(uint32 {node_id}, {{'source_type': <uint32 1>{size}}})");
+        glib::Variant::parse(Some(&Stream::static_variant_type()), &text)
+            .unwrap()
+            .get::<Stream>()
+            .unwrap()
+    }
+
+    #[test]
+    fn marking_before_recording_only_in_selection_with_layers_and_no_area() {
+        for mode in [CaptureMode::MonitorWindow, CaptureMode::Selection] {
+            for overlays in [false, true] {
+                for has_area in [false, true] {
+                    let expected = mode == CaptureMode::Selection && overlays && !has_area;
+                    assert_eq!(
+                        needs_marking(mode, overlays, has_area),
+                        expected,
+                        "{mode:?}, overlays: {overlays}, has_area: {has_area}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn area_to_record_only_in_selection_with_layers() {
+        let chosen = || {
+            Some(ChosenArea {
+                name: Some("Demo".into()),
+                area: on_dp3(),
+            })
+        };
+        assert_eq!(
+            area_to_record(CaptureMode::Selection, true, chosen),
+            chosen()
+        );
+        assert_eq!(area_to_record(CaptureMode::Selection, false, chosen), None);
+        assert_eq!(
+            area_to_record(CaptureMode::MonitorWindow, true, chosen),
+            None
+        );
+        assert_eq!(
+            area_to_record(CaptureMode::MonitorWindow, false, chosen),
+            None
+        );
+    }
+
+    #[test]
+    fn config_without_layers_has_no_area() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        settings.reset("profile-id");
+        let chosen = || {
+            Some(ChosenArea {
+                name: None,
+                area: on_dp3(),
+            })
+        };
+
+        let config = CaptureConfig::from_settings(
+            &settings,
+            area_to_record(CaptureMode::Selection, false, chosen),
+        )
+        .unwrap();
+        assert_eq!(config.area, None);
+
+        let config = CaptureConfig::from_settings(
+            &settings,
+            area_to_record(CaptureMode::Selection, true, chosen),
+        )
+        .unwrap();
+        assert_eq!(config.area, chosen());
+    }
+
+    #[test]
+    fn stale_area_message() {
+        let named = StaleArea {
+            name: Some("Demo".into()),
+            reason: "DP-3 is not connected".into(),
+        };
+        assert_eq!(
+            named.message(),
+            "The area “Demo” is out of date: DP-3 is not connected"
+        );
+        let last = StaleArea {
+            name: None,
+            reason: "DP-3 is not connected".into(),
+        };
+        assert_eq!(
+            last.message(),
+            "The last area is out of date: DP-3 is not connected"
+        );
+    }
+
+    #[test]
+    fn wrong_monitor_message() {
+        let wrong = WrongMonitor {
+            shared: Some((1920, 1080)),
+            connector: "DP-3".into(),
+            monitor: (1680, 1050),
+        };
+        assert_eq!(
+            wrong.to_string(),
+            "You shared 1920×1080, but the area is on DP-3 (1680×1050)"
+        );
+        let several = WrongMonitor {
+            shared: None,
+            ..wrong
+        };
+        assert_eq!(
+            several.to_string(),
+            "You shared more than one screen, but the area is on DP-3 (1680×1050)"
+        );
+    }
+
+    #[test]
+    fn stream_of_the_area_monitor_matches_by_size() {
+        let monitors = monitors();
+        // Physical, as KDE sends it.
+        assert_eq!(
+            match_stream(&[stream(1, Some((1680, 1050)))], &on_dp3(), &monitors),
+            StreamMatch::Same
+        );
+        // Logical, as the portal spec says.
+        assert_eq!(
+            match_stream(&[stream(1, Some((1600, 1000)))], &on_dp3(), &monitors),
+            StreamMatch::Same
+        );
+        // GDK says 1463×914 for the panel; the portal may round to 915.
+        assert_eq!(
+            match_stream(&[stream(1, Some((1463, 915)))], &on_edp(), &monitors),
+            StreamMatch::Same
+        );
+    }
+
+    #[test]
+    fn stream_of_another_monitor_does_not_match() {
+        let monitors = monitors();
+        assert_eq!(
+            match_stream(&[stream(1, Some((1920, 1080)))], &on_dp3(), &monitors),
+            StreamMatch::Other {
+                shared: Some((1920, 1080))
+            }
+        );
+        // The whole desktop.
+        assert_eq!(
+            match_stream(&[stream(1, Some((3520, 2130)))], &on_dp3(), &monitors),
+            StreamMatch::Other {
+                shared: Some((3520, 2130))
+            }
+        );
+        assert_eq!(
+            match_stream(
+                &[stream(1, Some((1680, 1050))), stream(2, Some((1920, 1080)))],
+                &on_dp3(),
+                &monitors
+            ),
+            StreamMatch::Other { shared: None }
+        );
+    }
+
+    #[test]
+    fn stream_without_size_is_unknown() {
+        assert_eq!(
+            match_stream(&[stream(1, None)], &on_dp3(), &monitors()),
+            StreamMatch::Unknown
+        );
+    }
+
+    /// What the portal stand-ins saw, in order.
+    type Events = Rc<RefCell<Vec<String>>>;
+
+    /// Opens sessions 1, 2, … whose stream has the next of `sizes`, with
+    /// the restore token `t1`, `t2`, …
+    async fn open_with(
+        sizes: Vec<Option<(i32, i32)>>,
+        events: &Events,
+    ) -> Result<(u32, Vec<Stream>)> {
+        let opened = Cell::new(0_u32);
+        open_session_for_area(
+            Some("saved".to_string()),
+            &on_dp3(),
+            &monitors(),
+            |token| {
+                let n = opened.get() + 1;
+                opened.set(n);
+                events.borrow_mut().push(format!("open {token:?}"));
+                let size = sizes[n as usize - 1];
+                async move { Ok((n, vec![stream(n, size)], Some(format!("t{n}")))) }
+            },
+            |session: u32| {
+                events.borrow_mut().push(format!("close {session}"));
+                async {}
+            },
+            || events.borrow_mut().push("forget".to_string()),
+            |message| events.borrow_mut().push(format!("notice {message}")),
+            |token| events.borrow_mut().push(format!("save {token:?}")),
+        )
+        .await
+    }
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        glib::MainContext::new().block_on(future)
+    }
+
+    #[test]
+    fn same_monitor_at_once_keeps_the_session() {
+        let events = Events::default();
+        let (session, _) = block_on(open_with(vec![Some((1680, 1050))], &events)).unwrap();
+
+        assert_eq!(session, 1);
+        assert_eq!(
+            *events.borrow(),
+            [r#"open Some("saved")"#, r#"save Some("t1")"#]
+        );
+    }
+
+    #[test]
+    fn another_monitor_asks_again_without_the_token() {
+        let events = Events::default();
+        let (session, _) = block_on(open_with(
+            vec![Some((1920, 1080)), Some((1680, 1050))],
+            &events,
+        ))
+        .unwrap();
+
+        assert_eq!(session, 2);
+        assert_eq!(
+            *events.borrow(),
+            [
+                r#"open Some("saved")"#,
+                "close 1",
+                "forget",
+                "notice Choose DP-3 (whole screen) in the sharing dialog",
+                "open None",
+                r#"save Some("t2")"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn another_monitor_twice_fails_and_keeps_no_token() {
+        let events = Events::default();
+        let err = block_on(open_with(
+            vec![Some((1920, 1080)), Some((2560, 1600))],
+            &events,
+        ))
+        .unwrap_err();
+
+        assert_eq!(
+            err.downcast_ref::<WrongMonitor>(),
+            Some(&WrongMonitor {
+                shared: Some((2560, 1600)),
+                connector: "DP-3".into(),
+                monitor: (1680, 1050),
+            })
+        );
+        assert_eq!(
+            *events.borrow(),
+            [
+                r#"open Some("saved")"#,
+                "close 1",
+                "forget",
+                "notice Choose DP-3 (whole screen) in the sharing dialog",
+                "open None",
+                "close 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_without_size_is_recorded() {
+        let events = Events::default();
+        let (session, _) = block_on(open_with(vec![None], &events)).unwrap();
+
+        assert_eq!(session, 1);
+        assert_eq!(
+            *events.borrow(),
+            [r#"open Some("saved")"#, r#"save Some("t1")"#]
+        );
     }
 
     #[test]
