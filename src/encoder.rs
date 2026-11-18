@@ -48,6 +48,9 @@ impl H264Encoder {
     /// The `gst-launch` chain from raw video to `video/x-h264`, before
     /// `queue ! h264parse`. It has `${N_THREADS}`: use it through
     /// `profile::expand`.
+    ///
+    /// The hardware encoders use a constant quantizer of 17, the `qp-max` of
+    /// the CPU one, so that text on screen looks the same with any of them.
     pub fn chain(self) -> &'static str {
         match self {
             // Converting to NV12 in the CPU first keeps `vapostproc` from
@@ -58,13 +61,13 @@ impl H264Encoder {
                 "video/x-raw,format=NV12 ! ",
                 "vapostproc ! ",
                 "video/x-raw(memory:VAMemory),format=NV12 ! ",
-                "vah264lpenc",
+                "vah264lpenc rate-control=cqp qpi=17 qpp=17 qpb=17",
             ),
             Self::Nvidia => concat!(
                 "cudaupload ! ",
                 "cudaconvert ! ",
                 "video/x-raw(memory:CUDAMemory),format=NV12 ! ",
-                "nvh264enc",
+                "nvh264enc rc-mode=constqp qp-const=17",
             ),
             Self::Cpu => concat!(
                 "videoconvert chroma-mode=none dither=none matrix-mode=output-only n-threads=${N_THREADS} ! ",
@@ -254,6 +257,9 @@ mod tests {
 
     use super::*;
 
+    /// The quantizer of `chain` for every encoder.
+    const CONSTANT_QP: u32 = 17;
+
     fn block_on<T>(future: impl Future<Output = T>) -> T {
         glib::MainContext::new().block_on(future)
     }
@@ -399,6 +405,71 @@ mod tests {
         }
 
         assert_eq!(block_on(H264Encoder::Cpu.works((1280, 720))), Ok(()));
+    }
+
+    /// Parses `encoder`'s chain as the recording does, failing on any
+    /// unknown property, and returns its encoder element, or `None` when the
+    /// chain is not installed.
+    fn parsed_encoder(encoder: H264Encoder, factory: &str) -> Option<gst::Element> {
+        gst::init().unwrap();
+        if !encoder.is_installed() {
+            eprintln!("Skipped: {encoder:?} is not installed");
+            return None;
+        }
+
+        let bin = gst::parse::bin_from_description_with_name_full(
+            &profile::expand("${H264_ENCODER}", encoder),
+            false,
+            "",
+            None,
+            gst::ParseFlags::FATAL_ERRORS,
+        )
+        .unwrap()
+        .downcast::<gst::Bin>()
+        .unwrap();
+        bin.iterate_elements().into_iter().flatten().find(|element| {
+            element
+                .factory()
+                .is_some_and(|element_factory| element_factory.name() == factory)
+        })
+    }
+
+    fn enum_nick(element: &gst::Element, property: &str) -> String {
+        let value = element.property_value(property);
+        glib::EnumValue::from_value(&value)
+            .map(|(_, value)| value.nick().to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn intel_encodes_with_the_constant_qp_of_the_cpu() {
+        let Some(element) = parsed_encoder(H264Encoder::Intel, "vah264lpenc") else {
+            return;
+        };
+
+        assert_eq!(enum_nick(&element, "rate-control"), "cqp");
+        for property in ["qpi", "qpp", "qpb"] {
+            assert_eq!(element.property::<u32>(property), CONSTANT_QP, "{property}");
+        }
+    }
+
+    #[test]
+    fn nvidia_encodes_with_the_constant_qp_of_the_cpu() {
+        let Some(element) = parsed_encoder(H264Encoder::Nvidia, "nvh264enc") else {
+            return;
+        };
+
+        assert_eq!(enum_nick(&element, "rc-mode"), "constqp");
+        assert_eq!(element.property::<i32>("qp-const"), CONSTANT_QP as i32);
+    }
+
+    #[test]
+    fn the_cpu_caps_its_qp_at_the_constant_qp() {
+        let Some(element) = parsed_encoder(H264Encoder::Cpu, "x264enc") else {
+            return;
+        };
+
+        assert_eq!(element.property::<u32>("qp-max"), CONSTANT_QP);
     }
 
     #[test]

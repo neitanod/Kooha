@@ -61,6 +61,23 @@ menos batería y deja dormida la placa NVIDIA. NVIDIA gasta menos CPU (89 % cont
 despertarla cuesta batería y, con la placa dormida, varios segundos de arranque. El orden se
 confirma con la medición del portal, que mide la fuente real de KDE.
 
+## Calidad de los codificadores
+
+Las cadenas de hardware fijan un cuantizador constante de 17, el `qp-max=17` de la cadena de CPU
+(`x264enc`), para que el texto en pantalla salga igual de nítido con cualquiera de los tres. Los
+nombres y los valores salen de `list_properties()` de cada elemento con Python gi, en esta
+máquina (GStreamer 1.28.2):
+
+| codificador | propiedades | valores por defecto que reemplazan |
+|---|---|---|
+| `vah264lpenc` | `rate-control=cqp qpi=17 qpp=17 qpb=17` | `rate-control=cbr`, `qpi`/`qpp`/`qpb` en 26 |
+| `nvh264enc` | `rc-mode=constqp qp-const=17` | `rc-mode=default`, `qp-const=-1` |
+| `x264enc` | `qp-max=17` (sin cambios) | `qp-max=51` |
+
+`vah264lpenc` en esta máquina admite `cbr`, `vbr`, `cqp` y `qvbr`. Las dos cadenas codificaron 30
+cuadros de 1280×720 hasta el EOS con esos valores. Las mediciones de las tablas de arriba son
+anteriores a este cambio: corrieron con los valores por defecto de cada elemento.
+
 ## Portal de KDE
 
 Pendiente.
