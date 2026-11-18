@@ -140,7 +140,7 @@ la interfaz.
 | 3 | Medición y pipeline | 3.1–3.4 | 0 | `tools/`, `docs/perf/`, `src/pipeline.rs` | 1 |
 | 4 | Cámara: mantener los cuadros | 4.1–4.3 | 0 | `Cargo.toml`, `Cargo.lock`, `src/camera_pip/v4l2.rs`, `src/camera_pip/mod.rs`, `src/camera_pip/devices.rs`, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui` | 1 |
 | 5 | Ventana, borde y grabación | 5.1–5.5 | 1, 2, 3 | `src/window/*`, `data/resources/ui/window.ui`, `src/recording.rs`, `src/area_border/mod.rs`, `src/area_border/geometry.rs` | 2 |
-| 6 | Ventana Rectángulos y bandeja | 6.1–6.4 | 1, 2 | `src/areas_window.rs`, `data/resources/ui/areas_window.ui`, `data/resources/resources.gresource.xml`, `src/tray/*`, `src/application.rs`, `src/main.rs` (una línea `mod areas_window;`) | 2 |
+| 6 | Ventana Rectángulos y bandeja | 6.1–6.4 | 1, 2 (con 5 sólo por los nombres de acción `win.mark-area` y `win.remark-area`) | `src/areas_window.rs`, `data/resources/ui/areas_window.ui`, `data/resources/resources.gresource.xml`, `src/tray/*`, `src/application.rs`, `src/main.rs` (una línea `mod areas_window;`) | 2 |
 | 7 | Codificador | 7.1–7.5 | 3, 4, 5 | `src/encoder.rs`, `src/profile.rs`, `data/resources/profiles.yml`, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/doctor/checks.rs`, `src/pipeline.rs`, `src/recording.rs` (sólo `CaptureConfig`), `src/main.rs` (una línea `mod encoder;`) | 3 |
 | 8 | Traducciones e integración final (orquestador) | 8.1–8.2 | todos | `po/es.po`, `po/POTFILES.in`, `README.md` | 4 |
 
@@ -365,7 +365,7 @@ fn size_changed_when_physical_size_differs() {
 Formato exacto de la spec, sección 2:
 
 ```rust
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // Default a mano: version 1
 pub struct AreasFile {
     pub version: u32,                 // 1
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -373,7 +373,7 @@ pub struct AreasFile {
     #[serde(default)]
     pub areas: Vec<SavedArea>,
     /// `Some(Selected::Named(name))`, `Some(Selected::Last)`, or `None`.
-    #[serde(default, with = "selected_serde")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "selected_serde")]
     pub selected: Option<Selected>,
 }
 
@@ -388,7 +388,9 @@ se deserializa como `None` externo igual que ausente, así que `selected_serde` 
 `Debug, Clone, PartialEq, Eq, Hash` (la bandeja lo mete en un enum con `Eq`). `Default` se
 implementa a mano con `version: 1`. Un archivo con `version` mayor a 1 da
 `LoadError::UnsupportedVersion`: no se renombra ni se sobrescribe, y el store queda vacío y en
-sólo lectura, con aviso.
+sólo lectura: cada cambio vale en memoria por esa sesión y emite `save-failed` con «rectangles.json
+was written by a newer Kooha» (fable r2 #10; test). `load_notice()` (que reemplaza a
+`broken_notice()`) avisa una vez del archivo roto, de un error de lectura o de la versión nueva.
 
 - [ ] **Tests que fallan** (directorios temporales con `std::env::temp_dir()` y el PID, como
   `settings::test_utils`):
@@ -448,8 +450,8 @@ pub struct ChosenArea { pub name: Option<String>, pub area: MarkedArea } // name
 &c.area)`), y `CaptureConfig.area` es `Option<ChosenArea>`, para que el error de área
 desactualizada tenga el nombre.
 
-Cada método que cambia algo guarda el archivo y emite `changed`. Antes de escribir, si la fecha
-de modificación del archivo cambió desde la última lectura o escritura propia, lo relee y aplica
+Cada método que cambia algo guarda el archivo y emite `changed`. Antes de escribir, si `(inodo, fecha de modificación, tamaño)` del archivo cambió desde la
+última lectura o escritura propia (fable r2 #9), lo relee y aplica
 la operación sobre lo leído (otro proceso de Kooha pudo escribirlo). Un error al guardar se
 loguea con `tracing::error!` y emite la señal `save-failed(String)`, que la ventana muestra como
 toast; la lista en memoria sigue valiendo.
@@ -561,9 +563,10 @@ en curso. Enter en el campo llama `parse_size` + `set_size`; con error agrega la
 `error` y no cambia nada; un segundo Enter (campo sin cambios) confirma.
 
 **Teclado con varias capas (fable r1 #7):** todas las capas son exclusivas y el compositor le da
-el teclado a una sola. Cada capa reenvía sus teclas a `AreaMarker`, que actúa sobre la capa
-activa: la que tiene el rectángulo, o la del puntero si no hay. Al hacer press en una capa, se le
-pide el foco de teclado a esa capa y, cuando corresponde, al campo Tamaño de esa capa.
+el teclado a una sola. Una sola capa está en `KeyboardMode::Exclusive` por vez (fable r2 #6): al hacer press en una
+capa, o al entrar el puntero en una capa cuando no hay rectángulo, esa capa pasa a `Exclusive` y
+las demás a `KeyboardMode::None`. Al arrancar, la del rectángulo inicial, o la del puntero, o la
+primera. Además cada capa reenvía sus teclas a `AreaMarker`, que actúa sobre la capa activa.
 
 - [ ] Test `#[gtk::test]` sin `present()`, con el guard `if overlay::availability().is_err() {
   return; }` como `src/area_border/view.rs:226`: construir la capa para el primer monitor del
@@ -653,10 +656,16 @@ Dos fuentes:
     2 s, o `--allow-dialog` explícito) y el stream es de tipo monitor; con `--with-kde-region`,
     nunca;
   - si no pudo escribirlo, avisa por stdout que la próxima grabación de Kooha va a preguntar;
-  - `--probe-session` sólo abre y cierra la sesión, para verificar antes si KDE acepta el token
-    desde un proceso que no es Kooha.
-  - En modo portal abre además una ventana con `videotestsrc pattern=ball` para que haya
-    movimiento en el monitor compartido.
+  - `--probe-session` abre la sesión, llama a `Start` y la cierra, para verificar si KDE acepta
+    el token desde un proceso que no es Kooha; `Start` consume el token, así que la regla de
+    escritura del sucesor vale igual para la sonda. Si apareció el diálogo, la clave queda como
+    estaba; con `--allow-dialog` tampoco se escribe, salvo con `--write-token`. El backup se
+    restituye a mano, y sólo si KDE pregunta siempre por ver otro identificador de app (fable
+    r2 #3).
+  - En modo portal, después de recibir el stream, abre una ventana con `videotestsrc
+    pattern=ball` en pantalla completa sobre el monitor cuyo tamaño físico coincide con el del
+    stream (`fullscreen_on_monitor`); descarta la pasada si la fuente entregó menos del 90 % de
+    los cuadros pedidos en la variante `today` (fable r2 #4).
 
 Variantes (`--variant`, repetible; `all` por defecto), con un área de 1280×720 en (200, 160):
 `today` (videorate → videoscale → videocrop → x264 como `profiles.yml`), `crop-first`
@@ -847,7 +856,7 @@ como las filas existentes).
   `TemplateChild`) y agregar `Window::add_toast(&self, toast: adw::Toast)`.
 - [ ] La ventana lee la lista con `Application::get().area_store()`, que agrega la tarea 0.4
   antes de que arranque la tanda 2.
-- [ ] Si `store.broken_notice()` devuelve un path al arrancar, toast «The list of areas was
+- [ ] Si `store.load_notice()` devuelve un path al arrancar, toast «The list of areas was
   unreadable; it was moved to {path}». La señal `save-failed` del store también va como toast
   («Couldn't save the list of areas: {error}»).
 - [ ] Tests: con un store sobre un temporal con un archivo roto, la ventana encola el toast
@@ -873,7 +882,13 @@ Elegir en el desplegable llama `store.select(...)`. Una desactualizada se puede 
 ver por qué no graba); el borde no se muestra.
 
 **Un único camino para marcar (fable r1 #6, #18):** `Window::mark_area(&self, target:
-MarkTarget)`, público, con `enum MarkTarget { New, Replace(String) }`.
+MarkTarget) -> impl Future<Output = Option<MarkedArea>>` (async; `None` si se canceló o ya había
+un marcado en curso), con `enum MarkTarget { New, Replace(String) }`. Hacia afuera de la ventana
+el contrato son **dos acciones con nombre** (fable r2 #1), que no generan dependencia de
+compilación: `win.mark-area` (sin parámetro, `MarkTarget::New`) y `win.remark-area` (parámetro
+`s`, el nombre, `MarkTarget::Replace`). El chunk 6 las activa con
+`app.window().activate_action("win.mark-area", None)` como hoy hace la bandeja con
+`win.toggle-record` (`src/application.rs:256-262`).
 - `New`: `area_marker::mark(store.selected_area().as_ref().map(|c| &c.area))` → `save_dialog::ask(.., |n|
   store.contains(n))` → `store.set_last` / `store.save_named(.., replace)`; `MarkAgain` vuelve a
   marcar con el área recién marcada como inicial.
@@ -881,8 +896,9 @@ MarkTarget)`, público, con `enum MarkTarget { New, Replace(String) }`.
   ..)`, sin diálogo de nombre.
 - `Cancelled` no hace nada. Mientras dura un marcado, `win.mark-area` y `win.toggle-record` se
   deshabilitan (fable r1 #7).
-`win.mark-area` llama `mark_area(New)`. La ventana Rectángulos, la bandeja y el toast de área
-desactualizada llaman este método, nunca `area_marker::mark` directo.
+La ventana Rectángulos y la bandeja activan esas dos acciones; el toast de área desactualizada
+llama `mark_area` directo (está en la ventana). Nadie llama `area_marker::mark` fuera de
+`mark_area`.
 
 `Ctrl+B` se suma también a `data/resources/ui/shortcuts.ui`.
 
@@ -920,8 +936,10 @@ fn border_source(state: RecordingState, selection_mode: bool, show_setting: bool
 
 **Archivos:** `src/recording.rs`, `src/area_border/mod.rs` (`stream_monitor` → `pub(crate)`).
 
-`CaptureConfig::from_settings` agrega `area: Option<ChosenArea>`: en modo Selección con capas
-disponibles, `Application::get().area_store().selected_area()`.
+`CaptureConfig::from_settings(settings, area: Option<ChosenArea>)` recibe el área de quien llama
+(fable r2 #5): `start_inner` pasa, en modo Selección con capas disponibles,
+`Application::get().area_store().selected_area()`; los tests existentes sin aplicación
+(`config_is_a_snapshot`) pasan `None`.
 
 Cuándo se marca antes de grabar, con una función pura (fable r1 #15):
 
@@ -969,8 +987,11 @@ stream → `Other`. Dos monitores del mismo tamaño dan `Same` con aviso en el l
   área en DP-3 → `Same`; stream 1600×1000 (lógico) ↔ área en DP-3 → `Same`; stream 1463×915 ↔
   área en eDP-1 (GDK 1463×914) → `Same`; stream 1920×1080 ↔ área en DP-3 → `Other`; stream
   3520×2130 ↔ área en DP-3 → `Other`; dos streams → `Other`; sin tamaño → `Unknown`.
-- [ ] El reintento de P9 va en una función async con la apertura de sesión inyectada
-  (`open: impl Fn(Option<String> /*token*/) -> Future<Output = Result<Session>>`), y se prueban
+- [ ] El reintento de P9 va en una función async genérica en el tipo de sesión (fable r2 #2):
+  `open: impl Fn(Option<String>) -> Future<Output = Result<(S, Vec<Stream>, Option<String>)>>`
+  y `close: impl Fn(S) -> Future<Output = ()>`; los tests usan `S = u32` y arman los `Stream` con
+  `Stream::from_variant(&(node_id, dict).to_variant())`. Ningún test crea un `gio::DBusProxy` ni
+  toca el bus de sesión. Se prueban
   los cuatro caminos: `Same` al primer intento; `Other` y después `Same` (cierra la primera
   sesión, borra el token, emite `notice`); `Other` dos veces (error final, y el token de la
   segunda sesión **no** se guarda); `Unknown` (graba).
@@ -1003,11 +1024,11 @@ stream → `Other`. Dos monitores del mismo tamaño dan `Same` con aviso en el l
 `describe()` y «· chosen» si es la elegida, o el motivo de `staleness` con clase `warning`.
 Sufijos: «Choose» (deshabilitado si está elegida o desactualizada), renombrar (abre un
 `adw::AlertDialog` con `adw::EntryRow` precargada; `NameTaken` → mensaje en el diálogo),
-«Mark Again» (siempre habilitado, también con el monitor desconectado: P10; llama
-`Window::mark_area(MarkTarget::Replace(name))`, que precarga si el monitor está y si no marca
-desde cero), borrar (confirmación
+«Mark Again» (siempre habilitado, también con el monitor desconectado: P10; activa
+`win.remark-area` con el nombre en la ventana principal, que precarga si el monitor está y si no
+marca desde cero), borrar (confirmación
 `adw::AlertDialog` destructiva). Lista vacía: `adw::StatusPage` «No Saved Areas» con el botón
-«Mark Area», que llama `Window::mark_area(MarkTarget::New)` de la ventana principal (el grupo
+«Mark Area», que activa `win.mark-area` sobre la ventana principal (`app.window()`; el grupo
 `win` no existe en esta ventana: fable r1 #18). Pie: «Saved in {path}». Se rearma con `store.connect_changed` y
 los cambios de monitores.
 
@@ -1032,8 +1053,9 @@ los cambios de monitores.
   con todos los radios del submenú; `select` manda el `SelectArea` del índice). Las desactualizadas
   van con `enabled: false`.
 - [ ] `handle_tray_command`: `SelectArea` → `store.select` + `settings.set_capture_mode(Selection)`;
-  `MarkArea` → presentar la ventana y llamar `Window::mark_area(New)`; `ToggleAreaBorder` → invertir
-  `show-area-border`. Refrescar la bandeja con `store.connect_changed` y la clave.
+  `MarkArea` → presentar la ventana y activar `win.mark-area` sobre ella; `ToggleAreaBorder` → invertir
+  `show-area-border`. Refrescar la bandeja con `store.connect_changed`, la clave y `areas::monitors::watch` (fable r2
+  #8); test de `model.rs` con un área que pasa a desactualizada.
 - [ ] Tests: los de `model.rs` (entradas con y sin capas, radio elegido, desactualizada
   deshabilitada) y los de `service.rs` (el submenú se mapea con la cantidad de hijos esperada).
 - [ ] Commit `feat: choose areas and toggle their border from the tray`.
@@ -1044,7 +1066,7 @@ los cambios de monitores.
 
 ---
 
-## Chunk 7 · Codificador (tanda 2)
+## Chunk 7 · Codificador (tanda 3)
 
 ### Tarea 7.1: cadenas y prueba previa
 
@@ -1070,7 +1092,9 @@ impl H264Encoder {
 /// docs/perf/2026-11-18-capture-bench.md.
 pub fn candidates(pref: VideoEncoder) -> Vec<H264Encoder>;
 pub const AUTO_ORDER: [H264Encoder; 3] = [/* lo que diga la medición */];
-pub fn resolve(pref: VideoEncoder, works: impl Fn(H264Encoder) -> bool) -> Option<H264Encoder>;
+/// Tries the candidates in order and stops at the first that works.
+pub async fn resolve<F, Fut>(pref: VideoEncoder, works: F) -> Option<H264Encoder>
+where F: Fn(H264Encoder) -> Fut, Fut: Future<Output = bool>;
 ```
 
 Cadenas (las ajusta la medición si encontró otra mejor):
@@ -1079,14 +1103,16 @@ Cadenas (las ajusta la medición si encontró otra mejor):
 - `Cpu`: `videoconvert chroma-mode=none dither=none matrix-mode=output-only n-threads=${N_THREADS} ! x264enc qp-max=17 speed-preset=ultrafast threads=${N_THREADS} ! capsfilter caps=video/x-h264,profile=baseline`
 
 `resolve`: forzado → ese, si `works`, si no `None`; `Auto` → el primero de `AUTO_ORDER` que
-`works` con el tamaño de salida de la grabación, con `Cpu` siempre último (codex r1 #17).
+`works` con el tamaño de salida de la grabación, con `Cpu` siempre último (codex r1 #17). Un
+timeout no se guarda en el caché (fable r2 #7). El tamaño de salida se conoce en `start_inner`
+después de recibir el stream y fijar el recorte, antes de `build()`.
 
 **Una sola expansión de marcadores (codex r1 #4):** `profile::expand(description, encoder)`
 reemplaza `${H264_ENCODER}` y después `${N_THREADS}`; la usan `parse_bin_inner` y `works()`. La
 cadena `Cpu` sin expandir no parsea (`n-threads="${N_THREADS}"`), así que `works()` nunca recibe
 la cadena cruda. Test: `Cpu.works((1280, 720))` pasa.
 
-- [ ] Tests puros de `candidates` y `resolve` con un `works` falso (todos fallan salvo CPU →
+- [ ] Tests puros de `candidates` y `resolve` con un `works` falso asíncrono (todos fallan salvo CPU →
   CPU; forzado Intel que falla → `None`). Test real de `Cpu.works()` (x264 está instalado en la
   máquina de desarrollo; si no está, el test se saltea con un mensaje).
 - [ ] Commit `feat: describe the H.264 encoders and test them before use`.
@@ -1171,8 +1197,11 @@ cierre lo dice (P12 lo había elegido).
   `pub fn area_store(&self) -> AreaStore` que lo crea con `AreaStore::load_default()` la primera
   vez, así los tests que construyen `Window` sin `startup` no entran en pánico. Bajo
   `cfg(test)`, `load_default()` usa el temporal de `areas::file::path()` (fable r1 #1).
-- [ ] `shutdown` llama `camera_pip().restore_camera_controls()` (fable r1 #19).
+- [ ] `shutdown` llama `if let Some(pip) = self.camera_pip() { pip.restore_camera_controls() }`
+  (fable r1 #19; `camera_pip()` devuelve `Option<&CameraPip>`).
 - [ ] `.gitignore` suma `_install/`.
+- [ ] Bajo `cfg(test)`, `areas::file::path()` suma un contador atómico al nombre, así cada store
+  creado en un test tiene su archivo (fable r2 #5).
 - [ ] Test: `Window::new(&Application::new())` sin `startup` y `area_store()` funciona, con la
   ruta bajo el temporal.
 - [ ] Commit `feat: load the saved areas at startup`.
@@ -1188,7 +1217,7 @@ cierre lo dice (P12 lo había elegido).
 
 ---
 
-## Chunk 8 · Traducciones e integración final (orquestador, tanda 3)
+## Chunk 8 · Traducciones e integración final (orquestador, tanda 4)
 
 ### Tarea 8.1: traducciones
 
@@ -1204,8 +1233,11 @@ cierre lo dice (P12 lo había elegido).
 
 ### Prueba de la etapa 8 (orquestador, con `run-dev.sh` y `KOOHA_MARKER_TIMEOUT_SECS=60`)
 
-Cada criterio de aceptación de la spec, en la sesión KDE real, y los criterios 14 (sin capas) en
-el Xvfb aislado con `GDK_BACKEND=x11`. Lo que no se puede probar sin Sebastián (elegir en el
+Cada criterio de aceptación de la spec, en la sesión KDE real. El criterio 14 (sin capas) en el
+Xvfb aislado con `GDK_BACKEND=x11` y `dbus-run-session` (sin portal): se comprueba que la fila
+de área no aparece, que la bandeja no suma el submenú Área y que Grabar no abre capas; la
+grabación con el selector de upstream la cubre `selector_path_crops_before_scaling`. La primera
+prueba de la capa de marcado comprueba además cómo reparte KWin el foco entre las capas. Lo que no se puede probar sin Sebastián (elegir en el
 diálogo de KDE) se le pide en el aviso de la primera versión.
 
 ---
@@ -1214,9 +1246,10 @@ diálogo de KDE) se le pide en el aviso de la primera versión.
 
 - **Teclado exclusivo en la capa de marcado:** con `KeyboardMode::Exclusive`, si el proceso se
   cuelga con las capas abiertas, KDE queda sin teclado para otras ventanas. Mitigación: Escape y
-  el botón derecho siempre cancelan, y las capas se destruyen en el `Drop` de `AreaMarker`.
-- **KDE y el tamaño del stream:** si KDE informa el tamaño lógico (no el físico), `stream_monitor`
-  ya lo acepta (compara contra los dos).
+  el botón derecho cancelan, un solo marcado a la vez, las capas se destruyen en el `Drop` de
+  `AreaMarker`, y `KOOHA_MARKER_TIMEOUT_SECS` corta el marcado en las pruebas.
+- **KDE y el tamaño del stream:** si KDE informa el tamaño lógico (no el físico), `match_stream`
+  lo acepta (compara contra los dos), y la sonda de `AreaCrop` valida el cuadro real.
 - **`vah264lpenc` y tamaños:** el modo *low power* puede exigir anchos alineados a 16; la
   medición lo dice. Si falla con 1280×720 no hay problema; con tamaños arbitrarios, la prueba
   previa con un tamaño fijo no lo detecta: la cadena Intel lleva `vapostproc` que puede ajustar,
