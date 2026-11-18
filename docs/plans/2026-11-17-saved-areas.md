@@ -426,7 +426,7 @@ impl AreaStore {
     pub fn areas(&self) -> Vec<SavedArea>;
     pub fn last(&self) -> Option<MarkedArea>;
     pub fn selected(&self) -> Option<Selected>;
-    pub fn selected_area(&self) -> Option<(Option<String>, MarkedArea)>; // (nombre, área)
+    pub fn selected_area(&self) -> Option<ChosenArea>;   // None también si el nombre ya no existe
     pub fn select(&self, selected: Option<Selected>);
     pub fn set_last(&self, area: MarkedArea);            // y la elige
     pub fn save_named(&self, name: &str, area: MarkedArea, replace: bool) -> Result<(), NameTaken>; // y la elige
@@ -436,6 +436,17 @@ impl AreaStore {
     pub fn contains(&self, name: &str) -> bool;
 }
 ```
+
+Contrato único del área elegida (codex r1 #3), en `src/areas/model.rs`:
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChosenArea { pub name: Option<String>, pub area: MarkedArea } // name None = último
+```
+
+`area_marker::mark` recibe `Option<&MarkedArea>` (quien llama pasa `chosen.as_ref().map(|c|
+&c.area)`), y `CaptureConfig.area` es `Option<ChosenArea>`, para que el error de área
+desactualizada tenga el nombre.
 
 Cada método que cambia algo guarda el archivo y emite `changed`. Antes de escribir, si la fecha
 de modificación del archivo cambió desde la última lectura o escritura propia, lo relee y aplica
@@ -568,7 +579,7 @@ pide el foco de teclado a esa capa y, cuando corresponde, al campo Tamaño de es
 una capa borra el rectángulo de las demás (`clear()`): el área vive en un solo monitor.
 
 ```rust
-pub async fn mark(initial: Option<MarkedArea>) -> anyhow::Result<MarkedArea>;
+pub async fn mark(initial: Option<&MarkedArea>) -> anyhow::Result<MarkedArea>;
 ```
 
 - `initial` se precarga si su connector está conectado y `fits()` el tamaño físico actual,
@@ -624,8 +635,9 @@ llama guarda con `replace = true` en ese caso.
 
 ### Tarea 3.1: script de medición
 
-**Archivos:** `tools/bench-capture.py` (ejecutable, `#!/usr/bin/env python3`), con docstring de
-uso.
+**Archivos:** `tools/bench-capture.py` (ejecutable, `#!/usr/bin/python3`: el `python3` del PATH
+es el de linuxbrew, sin `gi`; codex r1 #22), con docstring de uso. Al arrancar comprueba que
+`gi` y Gst 1.0 estén y, si no, sale con un mensaje claro.
 
 Dos fuentes:
 - `--source test` (por defecto): `videotestsrc pattern=ball is-live=true` a 2560×1600, formato
@@ -669,7 +681,7 @@ huecos de PTS mayores a 1,5 períodos); y si arrancó (error del bus). `--with-k
 comparación con la región de KDE (pide el diálogo; nunca guarda su token).
 Salida: una tabla Markdown por stdout y `--out <archivo>`.
 
-- [ ] Test: `python3 -I tools/bench-capture.py --source test --variant today --seconds 2 --fps 30`
+- [ ] Test: `/usr/bin/python3 -I tools/bench-capture.py --source test --variant today --seconds 2 --fps 30`
   termina con exit 0 e imprime una fila con `fps` cercano a 30 (es la prueba de que el script
   funciona; no hay suite de Python).
 - [ ] Commit `tools: add a capture benchmark for pipeline variants`.
@@ -700,8 +712,9 @@ pub struct AreaCrop {
   real difiera en un par de píxeles del tamaño guardado. Si el cuadro real difiere de
   `expected_frame` en más de 2 en algún eje, la sonda publica un error en el bus
   (`gst::element_error!`) en vez de recortar: sería un recorte corrido (fable r1 #2). Dentro de
-  la tolerancia, si `x + width > frame_w` (o en alto), el área se recorta al cuadro y se
-  redondea a par hacia abajo (`tracing::warn!`).
+  la tolerancia, si `x + width > frame_w` (o en alto), el área se **corre hacia adentro**
+  manteniendo su tamaño (el tamaño prometido no se achica; codex r1 #9); si `width > frame_w` o
+  `height > frame_h`, error en el bus.
 - **Selector de upstream** (sin capas): `videosrc_bin → videocrop → videoscale → caps pares →`
   … con `compute_crop` sin cambios en sus cálculos; las caps pares pasan a calcularse sobre el
   tamaño recortado (`crop.frame` menos los cuatro recortes, redondeado a par hacia abajo).
@@ -714,6 +727,8 @@ pub struct AreaCrop {
     video/x-raw,width=1680,height=1050 ! <videocrop con la sonda> ! fakesink` con
     `AreaCrop { x: 100, y: 80, width: 1280, height: 720 }`; tras `PLAYING` y EOS, las
     propiedades `right` = 300 y `bottom` = 250, y las caps de salida 1280×720.
+  - `area_crop_shifts_inside_within_tolerance`: cuadro real 2 y 1 píxeles más chico que
+    `expected_frame`, con el área pegada al borde: la salida mantiene 1280×720, corrida.
   - `area_crop_rejects_another_frame_size`: con `expected_frame` 1680×1050 y un cuadro de
     1920×1080, el bus recibe un error y no hay salida.
   - `selector_path_crops_before_scaling`: con `select_area_data`, el orden de elementos es
@@ -742,6 +757,8 @@ ahí.
 ### Tarea 3.4: correr la medición (orquestador)
 
 - [ ] `tools/bench-capture.py --source test --fps 60` y `--fps 30`.
+- [ ] Antes de usar el permiso, comprobar que Kooha no está grabando (sólo un proceso usa el
+  token por vez).
 - [ ] `--probe-session` primero: si KDE muestra el diálogo, no seguir; avisar por el Hilo y
   Sebastián lo corre (la spec lo prevé).
 - [ ] `--source portal --fps 60` y `--fps 30` en la sesión de Sebastián, con el permiso guardado
@@ -857,10 +874,10 @@ ver por qué no graba); el borde no se muestra.
 
 **Un único camino para marcar (fable r1 #6, #18):** `Window::mark_area(&self, target:
 MarkTarget)`, público, con `enum MarkTarget { New, Replace(String) }`.
-- `New`: `area_marker::mark(store.selected_area())` → `save_dialog::ask(.., |n|
+- `New`: `area_marker::mark(store.selected_area().as_ref().map(|c| &c.area))` → `save_dialog::ask(.., |n|
   store.contains(n))` → `store.set_last` / `store.save_named(.., replace)`; `MarkAgain` vuelve a
   marcar con el área recién marcada como inicial.
-- `Replace(name)`: `area_marker::mark(Some(area_de_ese_nombre))` → `store.replace_geometry(name,
+- `Replace(name)`: `area_marker::mark(Some(&area_de_ese_nombre))` → `store.replace_geometry(name,
   ..)`, sin diálogo de nombre.
 - `Cancelled` no hace nada. Mientras dura un marcado, `win.mark-area` y `win.toggle-record` se
   deshabilitan (fable r1 #7).
@@ -903,7 +920,7 @@ fn border_source(state: RecordingState, selection_mode: bool, show_setting: bool
 
 **Archivos:** `src/recording.rs`, `src/area_border/mod.rs` (`stream_monitor` → `pub(crate)`).
 
-`CaptureConfig::from_settings` agrega `area: Option<MarkedArea>`: en modo Selección con capas
+`CaptureConfig::from_settings` agrega `area: Option<ChosenArea>`: en modo Selección con capas
 disponibles, `Application::get().area_store().selected_area()`.
 
 Cuándo se marca antes de grabar, con una función pura (fable r1 #15):
@@ -1042,9 +1059,11 @@ impl H264Encoder {
     pub fn chain(self) -> &'static str;
     pub fn required_elements(self) -> &'static [&'static str];
     pub fn is_installed(self) -> bool;          // ElementFactory::find de cada uno
-    /// Runs `videotestsrc num-buffers=2 ! video/x-raw,format=BGRx,width=1280,height=720
-    /// ! <chain> ! fakesink` once per process, off the main thread; cached.
-    pub async fn works(self) -> Result<(), String>;
+    /// Runs `videotestsrc num-buffers=2 ! video/x-raw,format=BGRx,width=W,height=H
+    /// ! <chain, expanded> ! fakesink` with the recording's output size, in
+    /// `gio::spawn_blocking`, with a 3 s timeout and the pipeline set to Null at the end;
+    /// cached per (encoder, size).
+    pub async fn works(self, size: (i32, i32)) -> Result<(), String>;
 }
 
 /// Encoders to try, in order, for a preference. `AUTO_ORDER` comes from
@@ -1060,7 +1079,12 @@ Cadenas (las ajusta la medición si encontró otra mejor):
 - `Cpu`: `videoconvert chroma-mode=none dither=none matrix-mode=output-only n-threads=${N_THREADS} ! x264enc qp-max=17 speed-preset=ultrafast threads=${N_THREADS} ! capsfilter caps=video/x-h264,profile=baseline`
 
 `resolve`: forzado → ese, si `works`, si no `None`; `Auto` → el primero de `AUTO_ORDER` que
-`works`, con `Cpu` siempre último.
+`works` con el tamaño de salida de la grabación, con `Cpu` siempre último (codex r1 #17).
+
+**Una sola expansión de marcadores (codex r1 #4):** `profile::expand(description, encoder)`
+reemplaza `${H264_ENCODER}` y después `${N_THREADS}`; la usan `parse_bin_inner` y `works()`. La
+cadena `Cpu` sin expandir no parsea (`n-threads="${N_THREADS}"`), así que `works()` nunca recibe
+la cadena cruda. Test: `Cpu.works((1280, 720))` pasa.
 
 - [ ] Tests puros de `candidates` y `resolve` con un `works` falso (todos fallan salvo CPU →
   CPU; forzado Intel que falla → `None`). Test real de `Cpu.works()` (x264 está instalado en la
@@ -1081,8 +1105,10 @@ Cadenas (las ajusta la medición si encontró otra mejor):
   `PipelineBuilder::encoder(H264Encoder)` (default `Cpu`), y el test `profiles_validity`
   (`src/profile.rs:355`), que pasa `Cpu`.
 - [ ] `CaptureConfig` (`src/recording.rs`) suma `encoder: VideoEncoder`, leído una vez como el
-  resto. `start_inner` resuelve con `encoder::resolve` (la prueba previa corre con
-  `gio::spawn_blocking`, fuera del hilo principal) y lo pasa con `pipeline_builder.encoder(..)`.
+  resto. **Sólo para los perfiles `mp4` y `matroska-h264`** (codex r1 #12): con cualquier otro
+  perfil no se resuelve ni se prueba nada, y un H.264 forzado que no anda no impide grabar WebM o
+  GIF (test). `start_inner` resuelve con `encoder::resolve` (la prueba previa corre con
+  `gio::spawn_blocking`, fuera del hilo principal, con el tamaño de salida) y lo pasa con `pipeline_builder.encoder(..)`.
   Si da `None` (forzado y no anda), la grabación falla con `ContextWithHelp` «The {encoder}
   encoder is not working», el motivo, y la ayuda «Choose Automatic or CPU in Preferences». Si el
   codificador por hardware pasó la prueba pero falla con el tamaño real (error del bus al
@@ -1107,7 +1133,8 @@ Cadenas (las ajusta la medición si encontró otra mejor):
   se toca; la grabación da el error del ADR 0006.
 - [ ] Test: la fila es visible sólo con `mp4` y `matroska-h264`.
   Subtítulo con el codificador que usaría Automático hoy («Automatic uses Intel»), calculado con
-  `resolve` en un `glib::spawn_future_local` para no frenar el diálogo.
+  `resolve` para 1280×720; la prueba corre en `gio::spawn_blocking` (dentro de `works`), así el
+  diálogo no se frena.
 - [ ] Commit `feat: choose the video encoder in Preferences`.
 
 ### Tarea 7.4: reporte de requisitos
@@ -1174,6 +1201,12 @@ cierre lo dice (P12 lo había elegido).
 - [ ] `README.md` del fork (no hay `README.es.md`): sección corta de rectángulos guardados y
   del codificador.
 - [ ] Suite, clippy y fmt en los dos modos; comando de atribución vacío.
+
+### Prueba de la etapa 8 (orquestador, con `run-dev.sh` y `KOOHA_MARKER_TIMEOUT_SECS=60`)
+
+Cada criterio de aceptación de la spec, en la sesión KDE real, y los criterios 14 (sin capas) en
+el Xvfb aislado con `GDK_BACKEND=x11`. Lo que no se puede probar sin Sebastián (elegir en el
+diálogo de KDE) se le pide en el aviso de la primera versión.
 
 ---
 
