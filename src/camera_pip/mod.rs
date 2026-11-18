@@ -111,10 +111,7 @@ impl CameraPip {
         imp.settings.set(settings.clone()).unwrap();
         imp.view.set(PipView::new()).unwrap();
         // A Kooha that died with the camera on may have left it changed.
-        changed_control::restore_leftover(
-            &changed_control::default_path(),
-            set_dynamic_framerate,
-        );
+        changed_control::restore_leftover(&changed_control::default_path(), set_dynamic_framerate);
         if overlay::availability().is_ok() {
             imp.devices.set(DeviceCache::start()).unwrap();
         }

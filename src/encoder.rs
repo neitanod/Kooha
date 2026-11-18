@@ -224,9 +224,10 @@ where
                 let spawned = std::thread::Builder::new()
                     .name("kooha-encoder-probe".to_string())
                     .spawn(move || {
-                        let result = panic::catch_unwind(AssertUnwindSafe(probe)).unwrap_or_else(
-                            |_| Err(ProbeError::Failed("The probe panicked".to_string())),
-                        );
+                        let result =
+                            panic::catch_unwind(AssertUnwindSafe(probe)).unwrap_or_else(|_| {
+                                Err(ProbeError::Failed("The probe panicked".to_string()))
+                            });
                         finish(cache, thread_key, result);
                     });
                 if let Err(err) = spawned {
@@ -314,8 +315,9 @@ mod tests {
         cell::RefCell,
         future::ready,
         sync::{
-            Arc, mpsc,
+            Arc,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
         time::Instant,
     };
@@ -619,11 +621,14 @@ mod tests {
         .unwrap()
         .downcast::<gst::Bin>()
         .unwrap();
-        bin.iterate_elements().into_iter().flatten().find(|element| {
-            element
-                .factory()
-                .is_some_and(|element_factory| element_factory.name() == factory)
-        })
+        bin.iterate_elements()
+            .into_iter()
+            .flatten()
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|element_factory| element_factory.name() == factory)
+            })
     }
 
     fn enum_nick(element: &gst::Element, property: &str) -> String {

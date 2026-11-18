@@ -1333,25 +1333,23 @@ mod tests {
 
     fn element(factory: &str) -> gst::Object {
         gst::init().unwrap();
-        gst::ElementFactory::make(factory)
-            .build()
-            .unwrap()
-            .upcast()
+        gst::ElementFactory::make(factory).build().unwrap().upcast()
     }
 
     #[test]
     fn an_encoder_error_while_recording_explains_how_to_fix_it() {
         let help = encoder_error_help(Some(H264Encoder::Cpu), Some(&element("x264enc"))).unwrap();
         assert_eq!(help.to_string(), "The CPU encoder is not working");
-        assert_eq!(help.help_message(), "Choose Automatic or CPU in Preferences.");
+        assert_eq!(
+            help.help_message(),
+            "Choose Automatic or CPU in Preferences."
+        );
     }
 
     #[test]
     fn other_errors_while_recording_have_no_encoder_help() {
         // Not an element of the chosen encoder's chain.
-        assert!(
-            encoder_error_help(Some(H264Encoder::Intel), Some(&element("x264enc"))).is_none()
-        );
+        assert!(encoder_error_help(Some(H264Encoder::Intel), Some(&element("x264enc"))).is_none());
         assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("filesink"))).is_none());
         // A profile with no H.264 encoder, or no source.
         assert!(encoder_error_help(None, Some(&element("x264enc"))).is_none());

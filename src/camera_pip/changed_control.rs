@@ -116,7 +116,10 @@ fn save(path: &Path, control: &ChangedControl) -> io::Result<()> {
         fs::create_dir_all(dir)?;
     }
     let temp = path.with_extension("json.tmp");
-    fs::write(&temp, serde_json::to_vec(control).map_err(io::Error::other)?)?;
+    fs::write(
+        &temp,
+        serde_json::to_vec(control).map_err(io::Error::other)?,
+    )?;
     fs::rename(&temp, path)
 }
 
