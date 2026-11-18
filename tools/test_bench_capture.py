@@ -12,9 +12,13 @@ videotestsrc.
 
 import importlib.util
 import os
+import sys
 import tempfile
 import time
 import unittest
+
+# Keeps tools/ free of a __pycache__ for the imported script.
+sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPEC = importlib.util.spec_from_file_location(
