@@ -285,12 +285,19 @@ impl Window {
 
     /// Marks an area for `target` and saves it in the store: a new one as
     /// the last area or with a name, or the new geometry of a saved one.
-    /// Returns `None` if the marking was cancelled, or if another was open.
+    /// Returns `None` if the marking was cancelled, or if marking is
+    /// disabled: another marking is open, or there is a recording.
     ///
     /// This is the only caller of `area_marker::mark`. While it runs,
     /// neither marking nor recording can start.
     pub async fn mark_area(&self, target: MarkTarget) -> Option<MarkedArea> {
         let imp = self.imp();
+        // The toast's «Mark Again» calls this directly, past the disabled
+        // action (codex code r1 #3, fable code r1 #2).
+        if !self.enabled_actions().mark_area {
+            tracing::debug!("Marking is disabled now");
+            return None;
+        }
         if imp.marking.replace(true) {
             tracing::debug!("An area is already being marked");
             return None;
@@ -675,9 +682,11 @@ impl Window {
             }));
         }
 
-        // Show `Starting` while the portal dialog is open.
+        // Show `Starting` while the portal dialog is open, and mark nothing
+        // meanwhile.
         self.update_tray();
         self.update_inhibit();
+        self.update_actions();
 
         recording
             .start(Some(self), Application::get().settings())
@@ -769,6 +778,7 @@ impl Window {
 
             self.update_tray();
             self.update_inhibit();
+            self.update_actions();
         } else {
             tracing::warn!("Recording finished but no stored recording");
         }
@@ -830,13 +840,34 @@ impl Window {
             .map_or(RecordingState::Init, |(recording, _)| recording.state())
     }
 
-    /// Enables the recording and marking actions for the recording state
-    /// and whether an area is being marked.
+    /// The recording and marking actions enabled now.
+    fn enabled_actions(&self) -> area_row::EnabledActions {
+        let imp = self.imp();
+        area_row::enabled_actions(
+            self.recording_state(),
+            imp.recording.borrow().is_some(),
+            imp.marking.get(),
+        )
+    }
+
+    /// Enables the recording and marking actions, and the areas dropdown,
+    /// for the recording and whether an area is being marked.
     fn update_actions(&self) {
-        let enabled = area_row::enabled_actions(self.recording_state(), self.imp().marking.get());
+        let enabled = self.enabled_actions();
         self.action_set_enabled("win.toggle-record", enabled.toggle_record);
         self.action_set_enabled("win.mark-area", enabled.mark_area);
         self.action_set_enabled("win.remark-area", enabled.mark_area);
+        self.update_area_dropdown_sensitivity();
+    }
+
+    /// The areas dropdown chooses when there is something to choose and
+    /// marking is enabled: the chosen area must not change under a
+    /// recording that already read it (fable code r1 #1).
+    fn update_area_dropdown_sensitivity(&self) {
+        let imp = self.imp();
+        let has_items = !imp.area_items.borrow().is_empty();
+        imp.area_dropdown
+            .set_sensitive(has_items && self.enabled_actions().mark_area);
     }
 
     fn update_view(&self) {
@@ -1203,11 +1234,11 @@ impl Window {
         if imp.area_dropdown.selected() != position {
             imp.area_dropdown.set_selected(position);
         }
-        imp.area_dropdown.set_sensitive(!items.is_empty());
         imp.updating_area_dropdown.set(false);
 
         imp.area_items
             .replace(items.into_iter().map(|(_, item, _)| item).collect());
+        self.update_area_dropdown_sensitivity();
     }
 
     fn setup_camera_button(&self) {
@@ -1662,6 +1693,56 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "Demo");
         assert_eq!(saved[0].area, area(200));
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn nothing_marks_while_a_recording_opens_its_session() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        store.save_named("Demo", area(100), false).unwrap();
+        let markings = Rc::new(Cell::new(0));
+        window.set_marker(Rc::new(clone!(
+            #[strong]
+            markings,
+            move |_| {
+                markings.set(markings.get() + 1);
+                Box::pin(async { Ok(area(200)) })
+            }
+        )));
+        let mark_button = window.imp().mark_area_button.get();
+        let dropdown = window.imp().area_dropdown.get();
+        assert!(mark_button.is_sensitive() && dropdown.is_sensitive());
+
+        // A recording in `Init`, as while the portal dialog is open.
+        window
+            .imp()
+            .recording
+            .replace(Some((Recording::new(), Vec::new())));
+        window.update_actions();
+
+        assert!(!mark_button.is_sensitive());
+        assert!(!dropdown.is_sensitive());
+        // The «Mark Again» button of a toast calls it directly.
+        assert_eq!(
+            window.mark_area(MarkTarget::Replace("Demo".into())).await,
+            None
+        );
+        assert_eq!(window.mark_area(MarkTarget::New).await, None);
+        assert_eq!(markings.get(), 0);
+        assert_eq!(store.areas()[0].area, area(100));
+
+        window.imp().recording.take();
+        window.update_actions();
+        assert!(mark_button.is_sensitive() && dropdown.is_sensitive());
+        assert_eq!(
+            window.mark_area(MarkTarget::Replace("Demo".into())).await,
+            Some(area(200))
+        );
+        assert_eq!(markings.get(), 1);
     }
 
     #[gtk::test]

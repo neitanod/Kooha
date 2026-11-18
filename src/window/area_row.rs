@@ -50,11 +50,13 @@ pub struct EnabledActions {
     pub mark_area: bool,
 }
 
-/// The actions enabled in the recording `state`, while an area is being
-/// marked or not. Marking needs no recording in course; recording waits
-/// for the marking to end.
-pub fn enabled_actions(state: RecordingState, marking: bool) -> EnabledActions {
-    let idle = matches!(state, RecordingState::Init | RecordingState::Finished);
+/// The actions enabled in the recording `state`, with a recording or not,
+/// while an area is being marked or not. Marking needs no recording at
+/// all, not even one in `Init` while the portal opens its session;
+/// recording waits for the marking to end.
+pub fn enabled_actions(state: RecordingState, has_recording: bool, marking: bool) -> EnabledActions {
+    let idle =
+        !has_recording && matches!(state, RecordingState::Init | RecordingState::Finished);
     let busy = matches!(
         state,
         RecordingState::Delayed { .. } | RecordingState::Flushing { .. }
@@ -236,30 +238,38 @@ mod tests {
             toggle_record,
             mark_area,
         };
+        // (state, a recording exists, marking, expected)
         let table = [
-            (RecordingState::Init, false, enabled(true, true)),
-            (RecordingState::Init, true, enabled(false, false)),
-            (RecordingState::Finished, false, enabled(true, true)),
-            (RecordingState::Finished, true, enabled(false, false)),
+            (RecordingState::Init, false, false, enabled(true, true)),
+            (RecordingState::Init, false, true, enabled(false, false)),
+            // A recording opening the portal session (fable code r1 #1):
+            // a second Record stops it, nothing marks.
+            (RecordingState::Init, true, false, enabled(true, false)),
+            (RecordingState::Init, true, true, enabled(false, false)),
+            (RecordingState::Finished, false, false, enabled(true, true)),
+            (RecordingState::Finished, false, true, enabled(false, false)),
+            (RecordingState::Finished, true, false, enabled(true, false)),
             (
                 RecordingState::Delayed { secs_left: 3 },
+                true,
                 false,
                 enabled(false, false),
             ),
-            (RecordingState::Recording, false, enabled(true, false)),
-            (RecordingState::Recording, true, enabled(false, false)),
-            (RecordingState::Paused, false, enabled(true, false)),
+            (RecordingState::Recording, true, false, enabled(true, false)),
+            (RecordingState::Recording, true, true, enabled(false, false)),
+            (RecordingState::Paused, true, false, enabled(true, false)),
             (
                 RecordingState::Flushing { progress: 50 },
+                true,
                 false,
                 enabled(false, false),
             ),
         ];
-        for (state, marking, expected) in table {
+        for (state, has_recording, marking, expected) in table {
             assert_eq!(
-                enabled_actions(state, marking),
+                enabled_actions(state, has_recording, marking),
                 expected,
-                "{state:?}, marking: {marking}"
+                "{state:?}, recording: {has_recording}, marking: {marking}"
             );
         }
     }
