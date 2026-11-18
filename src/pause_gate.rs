@@ -76,8 +76,58 @@ impl PauseTimeline {
     }
 }
 
-/// How long the resume flash lasts, in output time.
-const FLASH_DURATION: gst::ClockTime = gst::ClockTime::from_mseconds(150);
+/// The resume flash, in output time: it fades in, holds and fades out, about
+/// two, one and three frames at 30 FPS.
+const FLASH_FADE_IN: gst::ClockTime = gst::ClockTime::from_mseconds(66);
+const FLASH_HOLD: gst::ClockTime = gst::ClockTime::from_mseconds(34);
+const FLASH_FADE_OUT: gst::ClockTime = gst::ClockTime::from_mseconds(100);
+/// The whole flash, as the tests measure it.
+#[cfg(test)]
+const FLASH_DURATION: gst::ClockTime = gst::ClockTime::from_mseconds(200);
+
+/// The color the resume flash fades to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashColor {
+    White,
+    Black,
+}
+
+impl From<crate::settings::PauseFlashColor> for FlashColor {
+    fn from(color: crate::settings::PauseFlashColor) -> Self {
+        match color {
+            crate::settings::PauseFlashColor::White => Self::White,
+            crate::settings::PauseFlashColor::Black => Self::Black,
+        }
+    }
+}
+
+/// How much of the flash color covers a frame `elapsed` after the resume,
+/// from 0 (none) to 1 (all).
+fn flash_level(elapsed: gst::ClockTime) -> f64 {
+    let ms = |time: gst::ClockTime| time.nseconds() as f64 / 1_000_000.0;
+    let elapsed = ms(elapsed);
+    let (fade_in, hold, fade_out) = (ms(FLASH_FADE_IN), ms(FLASH_HOLD), ms(FLASH_FADE_OUT));
+
+    if elapsed < fade_in {
+        elapsed / fade_in
+    } else if elapsed <= fade_in + hold {
+        1.0
+    } else if elapsed < fade_in + hold + fade_out {
+        1.0 - (elapsed - fade_in - hold) / fade_out
+    } else {
+        0.0
+    }
+}
+
+/// The `videobalance` saturation and brightness for a flash `level`: the
+/// color drains while the brightness goes to white (+1) or black (-1).
+fn flash_balance(color: FlashColor, level: f64) -> (f64, f64) {
+    let direction = match color {
+        FlashColor::White => 1.0,
+        FlashColor::Black => -1.0,
+    };
+    (1.0 - level, direction * level)
+}
 
 /// Shared between the GTK thread (pause/resume) and streaming threads (probes).
 #[derive(Debug, Clone, Default)]
@@ -93,7 +143,9 @@ struct GateState {
 #[derive(Debug)]
 struct FlashState {
     videobalance: gst::Element,
-    is_white: bool,
+    color: FlashColor,
+    /// The level last set on the `videobalance`.
+    level: f64,
 }
 
 impl PauseGate {
@@ -162,8 +214,10 @@ impl PauseGate {
 
                 // The videobalance runs right after this pad, in this same
                 // thread, so the change applies to this buffer.
-                if let Some((videobalance, is_white)) = flash_change {
-                    set_white(&videobalance, is_white);
+                if let Some((videobalance, balance)) = flash_change {
+                    let (saturation, brightness) = balance;
+                    videobalance.set_property("saturation", saturation);
+                    videobalance.set_property("brightness", brightness);
                 }
 
                 gst::PadProbeReturn::Ok
@@ -174,10 +228,11 @@ impl PauseGate {
 
     /// Enables the resume flash driven by `videobalance`, which must be the
     /// element right after the gated video pad.
-    pub fn set_flash_element(&self, videobalance: &gst::Element) {
+    pub fn set_flash_element(&self, videobalance: &gst::Element, color: FlashColor) {
         self.state().flash = Some(FlashState {
             videobalance: videobalance.clone(),
-            is_white: false,
+            color,
+            level: 0.0,
         });
     }
 
@@ -192,7 +247,7 @@ impl GateState {
         &mut self,
         pad: &gst::Pad,
         output: gst::ClockTime,
-    ) -> Option<(gst::Element, bool)> {
+    ) -> Option<(gst::Element, (f64, f64))> {
         let Self { timeline, flash } = self;
         let flash = flash.as_mut()?;
 
@@ -204,22 +259,20 @@ impl GateState {
             return None;
         }
 
-        let is_white = timeline
+        let level = timeline
             .last_resume_output()
-            .is_some_and(|resume| output >= resume && output < resume + FLASH_DURATION);
-        if is_white == flash.is_white {
+            .and_then(|resume| output.checked_sub(resume))
+            .map_or(0.0, flash_level);
+        if level == flash.level {
             return None;
         }
 
-        flash.is_white = is_white;
-        Some((flash.videobalance.clone(), is_white))
+        flash.level = level;
+        Some((
+            flash.videobalance.clone(),
+            flash_balance(flash.color, level),
+        ))
     }
-}
-
-fn set_white(videobalance: &gst::Element, is_white: bool) {
-    let (saturation, brightness) = if is_white { (0.0, 1.0) } else { (1.0, 0.0) };
-    videobalance.set_property("saturation", saturation);
-    videobalance.set_property("brightness", brightness);
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -591,15 +644,39 @@ mod tests {
         pixel.iter().all(|&channel| channel <= 0x10)
     }
 
-    /// Criterion C3.
+    fn ms(value: u64) -> gst::ClockTime {
+        gst::ClockTime::from_mseconds(value)
+    }
+
+    #[test]
+    fn flash_fades_in_holds_and_fades_out() {
+        assert_eq!(flash_level(ms(0)), 0.0);
+        assert!((flash_level(ms(33)) - 0.5).abs() < 0.02);
+        assert_eq!(flash_level(ms(66)), 1.0);
+        assert_eq!(flash_level(ms(90)), 1.0);
+        assert!((flash_level(ms(150)) - 0.5).abs() < 0.02);
+        assert_eq!(flash_level(FLASH_DURATION), 0.0);
+        assert_eq!(flash_level(ms(1000)), 0.0);
+    }
+
+    #[test]
+    fn flash_levels_map_to_balance() {
+        assert_eq!(flash_balance(FlashColor::White, 0.0), (1.0, 0.0));
+        assert_eq!(flash_balance(FlashColor::White, 1.0), (0.0, 1.0));
+        assert_eq!(flash_balance(FlashColor::Black, 1.0), (0.0, -1.0));
+        assert_eq!(flash_balance(FlashColor::Black, 0.5), (0.5, -0.5));
+    }
+
+    /// Criterion C3, with a white flash.
     #[test]
     fn resume_flash_is_white() {
         let harness = Harness::new(
             "videotestsrc is-live=true pattern=black ! video/x-raw,format=BGRx,framerate=30/1 ! identity name=gate ! videobalance name=flash ! fakesink name=sink sync=false",
         );
-        harness
-            .gate
-            .set_flash_element(&harness.pipeline.by_name("flash").unwrap());
+        harness.gate.set_flash_element(
+            &harness.pipeline.by_name("flash").unwrap(),
+            FlashColor::White,
+        );
 
         let frames = Arc::new(Mutex::new(Vec::new()));
         let frames_clone = Arc::clone(&frames);
@@ -632,10 +709,13 @@ mod tests {
             .filter(|(pts, _)| (resume_out..window_end).contains(pts))
             .collect::<Vec<_>>();
         assert!(in_window.len() >= 3, "{frames:?}");
+        // It fades: some frame of the window is fully white, and the first
+        // one is not.
         assert!(
-            in_window.iter().all(|(_, pixel)| is_white(*pixel)),
+            in_window.iter().any(|(_, pixel)| is_white(*pixel)),
             "{in_window:?}"
         );
+        assert!(!is_white(in_window[0].1), "{in_window:?}");
         let (_, first_after) = frames
             .iter()
             .find(|(pts, _)| *pts >= window_end)
@@ -647,6 +727,55 @@ mod tests {
                 .filter(|(pts, _)| *pts < resume_out)
                 .all(|(_, pixel)| is_black(*pixel))
         );
+    }
+
+    /// A black flash over a white picture, which is back to white after it.
+    #[test]
+    fn resume_flash_can_be_black() {
+        let harness = Harness::new(
+            "videotestsrc is-live=true pattern=white ! video/x-raw,format=BGRx,framerate=30/1 ! identity name=gate ! videobalance name=flash ! fakesink name=sink sync=false",
+        );
+        harness.gate.set_flash_element(
+            &harness.pipeline.by_name("flash").unwrap(),
+            FlashColor::Black,
+        );
+
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let frames_clone = Arc::clone(&frames);
+        harness
+            .pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let buffer = info.buffer().unwrap();
+                let map = buffer.map_readable().unwrap();
+                frames_clone
+                    .lock()
+                    .unwrap()
+                    .push((buffer.pts().unwrap(), [map[0], map[1], map[2]]));
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+
+        harness.record_pause_resume();
+
+        let resume_out = harness.gate.state().timeline.last_resume_output().unwrap();
+        let window_end = resume_out + FLASH_DURATION;
+        let frames = frames.lock().unwrap().clone();
+        assert!(
+            frames
+                .iter()
+                .filter(|(pts, _)| (resume_out..window_end).contains(pts))
+                .any(|(_, pixel)| is_black(*pixel)),
+            "{frames:?}"
+        );
+        let (_, first_after) = frames
+            .iter()
+            .find(|(pts, _)| *pts >= window_end)
+            .expect("no frame after the flash");
+        assert!(is_white(*first_after), "{first_after:?}");
     }
 
     /// How a `file_duration` recording ends.
@@ -722,7 +851,7 @@ mod tests {
             videosrc.upcast_ref(),
             GatedBranch::Video,
             &gate,
-            false,
+            None,
         )
         .unwrap();
         let audio_queue = link_gated_queue(
@@ -730,7 +859,7 @@ mod tests {
             audiosrc.upcast_ref(),
             GatedBranch::Audio,
             &gate,
-            false,
+            None,
         )
         .unwrap();
         profile

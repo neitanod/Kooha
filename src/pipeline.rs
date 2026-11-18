@@ -7,7 +7,7 @@ use std::{os::unix::io::RawFd, path::PathBuf};
 use crate::{
     area_selector::SelectAreaData,
     device::{self, DeviceClass},
-    pause_gate::PauseGate,
+    pause_gate::{FlashColor, PauseGate},
     profile::Profile,
     screencast_portal::Stream,
 };
@@ -26,7 +26,7 @@ pub struct PipelineBuilder {
     record_microphone: bool,
     select_area_data: Option<SelectAreaData>,
     pause_gate: PauseGate,
-    pause_flash: bool,
+    pause_flash: Option<FlashColor>,
 }
 
 impl PipelineBuilder {
@@ -47,7 +47,7 @@ impl PipelineBuilder {
             record_microphone: false,
             select_area_data: None,
             pause_gate: PauseGate::default(),
-            pause_flash: false,
+            pause_flash: None,
         }
     }
 
@@ -71,7 +71,8 @@ impl PipelineBuilder {
         self
     }
 
-    pub fn pause_flash(&mut self, pause_flash: bool) -> &mut Self {
+    /// The color of the resume flash, or `None` for no flash.
+    pub fn pause_flash(&mut self, pause_flash: Option<FlashColor>) -> &mut Self {
         self.pause_flash = pause_flash;
         self
     }
@@ -95,7 +96,7 @@ impl PipelineBuilder {
             record_desktop_audio = ?self.record_desktop_audio,
             record_microphone = ?self.record_microphone,
             select_area_data = ?self.select_area_data,
-            pause_flash = self.pause_flash,
+            pause_flash = ?self.pause_flash,
         );
 
         let pipeline = gst::Pipeline::new();
@@ -156,7 +157,7 @@ impl PipelineBuilder {
                 audiosrc_bin.upcast_ref(),
                 GatedBranch::Audio,
                 &self.pause_gate,
-                false,
+                None,
             )?)
         } else {
             None
@@ -194,7 +195,7 @@ pub fn link_gated_queue(
     src: &gst::Element,
     branch: GatedBranch,
     gate: &PauseGate,
-    pause_flash: bool,
+    pause_flash: Option<FlashColor>,
 ) -> Result<gst::Element> {
     let (gate_name, queue_name) = match branch {
         GatedBranch::Video => ("kooha-video-gate", "kooha-videoenc-queue"),
@@ -214,13 +215,13 @@ pub fn link_gated_queue(
     // the flash, so that both run in the same streaming thread.
     gate.attach(&identity.static_pad("src").unwrap());
 
-    if branch == GatedBranch::Video && pause_flash {
+    if let (GatedBranch::Video, Some(color)) = (branch, pause_flash) {
         let videobalance = gst::ElementFactory::make("videobalance")
             .name("kooha-pause-flash")
             .build()?;
         pipeline.add(&videobalance)?;
         gst::Element::link_many([&identity, &videobalance, &queue])?;
-        gate.set_flash_element(&videobalance);
+        gate.set_flash_element(&videobalance, color);
     } else {
         identity.link(&queue)?;
     }
@@ -638,8 +639,9 @@ mod test {
         let pipeline = gst::Pipeline::new();
         let src = gst::ElementFactory::make("fakesrc").build().unwrap();
         pipeline.add(&src).unwrap();
+        let flash = pause_flash.then_some(FlashColor::White);
         let queue =
-            link_gated_queue(&pipeline, &src, branch, &PauseGate::default(), pause_flash).unwrap();
+            link_gated_queue(&pipeline, &src, branch, &PauseGate::default(), flash).unwrap();
         (pipeline, src, queue)
     }
 

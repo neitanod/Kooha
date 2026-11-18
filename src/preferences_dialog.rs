@@ -18,7 +18,7 @@ use crate::{
     item_row::ItemRow,
     overlay::{self, OverlayUnavailable},
     profile::Profile,
-    settings::{CameraShape, Settings},
+    settings::{CameraShape, PauseFlashColor, Settings},
 };
 
 static BUILTIN_FRAMERATES: &[gst::Fraction] = &[
@@ -62,6 +62,8 @@ mod imp {
         pub(super) framerate_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(super) pause_flash_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(super) pause_flash_color_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(super) camera_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child]
@@ -152,6 +154,11 @@ mod imp {
             settings
                 .bind_pause_flash(&self.pause_flash_row.get(), "active")
                 .build();
+            settings
+                .bind_pause_flash(&self.pause_flash_color_row.get(), "sensitive")
+                .get_only()
+                .build();
+            obj.setup_pause_flash_color_row();
             settings
                 .bind_camera_enabled(&self.camera_enabled_row.get(), "active")
                 .build();
@@ -504,6 +511,43 @@ impl PreferencesDialog {
         }
     }
 
+    /// The flash color row: White, then Black, as in the schema.
+    fn setup_pause_flash_color_row(&self) {
+        let row = self.imp().pause_flash_color_row.get();
+        let settings = self.settings();
+
+        let position = |color: PauseFlashColor| match color {
+            PauseFlashColor::White => 0,
+            PauseFlashColor::Black => 1,
+        };
+        row.set_selected(position(settings.pause_flash_color()));
+
+        settings.connect_pause_flash_color_changed(clone!(
+            #[weak]
+            row,
+            move |settings| {
+                let selected = position(settings.pause_flash_color());
+                if row.selected() != selected {
+                    row.set_selected(selected);
+                }
+            }
+        ));
+        row.connect_selected_notify(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |row| {
+                let color = match row.selected() {
+                    0 => PauseFlashColor::White,
+                    1 => PauseFlashColor::Black,
+                    _ => return,
+                };
+                if color != obj.settings().pause_flash_color() {
+                    obj.settings().set_pause_flash_color(color);
+                }
+            }
+        ));
+    }
+
     fn setup_rows(&self) {
         let imp = self.imp();
 
@@ -852,6 +896,34 @@ mod tests {
         assert!(!row.is_active());
 
         settings.reset("pause-flash");
+    }
+
+    #[gtk::test]
+    fn pause_flash_color_row_follows_setting() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        settings.reset("pause-flash");
+        settings.reset("pause-flash-color");
+        let dialog = PreferencesDialog::new(&settings);
+        let row = dialog.imp().pause_flash_color_row.get();
+
+        // Only usable with the flash on.
+        assert!(!row.is_sensitive());
+        settings.set_pause_flash(true);
+        assert!(row.is_sensitive());
+
+        assert_eq!(row.selected(), 0);
+        row.set_selected(1);
+        assert_eq!(settings.pause_flash_color(), PauseFlashColor::Black);
+        settings.set_pause_flash_color(PauseFlashColor::White);
+        assert_eq!(row.selected(), 0);
+
+        settings.reset("pause-flash");
+        settings.reset("pause-flash-color");
     }
 
     const CAMERA_KEYS: [&str; 4] = [

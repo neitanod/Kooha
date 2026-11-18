@@ -29,7 +29,7 @@ use crate::{
     experimental::Feature,
     help::ContextWithHelp,
     i18n::gettext_f,
-    pause_gate::PauseGate,
+    pause_gate::{FlashColor, PauseGate},
     pipeline::{PipelineBuilder, compute_crop},
     profile::Profile,
     screencast_portal::{
@@ -66,6 +66,7 @@ pub struct CaptureConfig {
     pub record_delay: Duration,
     pub saving_location: PathBuf,
     pub pause_flash: bool,
+    pub pause_flash_color: FlashColor,
 }
 
 impl CaptureConfig {
@@ -80,6 +81,7 @@ impl CaptureConfig {
             record_delay: settings.record_delay(),
             saving_location: settings.saving_location(),
             pause_flash: settings.pause_flash(),
+            pause_flash_color: settings.pause_flash_color().into(),
         })
     }
 
@@ -310,7 +312,7 @@ impl Recording {
 
         pipeline_builder
             .pause_gate(imp.pause_gate.clone())
-            .pause_flash(config.pause_flash);
+            .pause_flash(config.pause_flash.then_some(config.pause_flash_color));
 
         // Build pipeline
         let pipeline = pipeline_builder.build().with_context(|| {

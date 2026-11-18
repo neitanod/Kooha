@@ -51,7 +51,20 @@
             <child>
               <object class="AdwSwitchRow" id="pause_flash_row">
                 <property name="title" translatable="yes">Flash on Resume</property>
-                <property name="subtitle" translatable="yes">Mark each resume with a short white flash</property>
+                <property name="subtitle" translatable="yes">Mark each resume with a short fade</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="pause_flash_color_row">
+                <property name="title" translatable="yes">Flash Color</property>
+                <property name="model">
+                  <object class="GtkStringList">
+                    <items>
+                      <item translatable="yes">White</item>
+                      <item translatable="yes">Black</item>
+                    </items>
+                  </object>
+                </property>
               </object>
             </child>
           </object>

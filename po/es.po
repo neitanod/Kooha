@@ -131,8 +131,20 @@ msgid "Flash on Resume"
 msgstr "Destello al reanudar"
 
 #: data/resources/ui/preferences_dialog.ui:54
-msgid "Mark each resume with a short white flash"
-msgstr "Marca cada reanudación con un breve destello blanco"
+msgid "Mark each resume with a short fade"
+msgstr "Marca cada reanudación con un breve fundido"
+
+#: data/resources/ui/preferences_dialog.ui
+msgid "Flash Color"
+msgstr "Color del destello"
+
+#: data/resources/ui/preferences_dialog.ui
+msgid "White"
+msgstr "Blanco"
+
+#: data/resources/ui/preferences_dialog.ui
+msgid "Black"
+msgstr "Negro"
 
 #: data/resources/ui/preferences_dialog.ui:13
 msgid "Delay (Seconds)"

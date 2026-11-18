@@ -20,6 +20,13 @@
     <key type="b" name="pause-flash">
       <default>false</default>
     </key>
+    <key type="s" name="pause-flash-color">
+      <choices>
+        <choice value="white"/>
+        <choice value="black"/>
+      </choices>
+      <default>"white"</default>
+    </key>
     <key type="b" name="camera-enabled">
       <default>false</default>
     </key>
