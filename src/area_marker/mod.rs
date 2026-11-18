@@ -463,8 +463,8 @@ mod layers {
         }
 
         /// The monitor of the layer `id` was disconnected: its layer goes,
-        /// with the rectangle if it had it. Without layers, the marking is
-        /// cancelled.
+        /// with the rectangle if it had it, and the active one of the rest
+        /// takes the keyboard. Without layers, the marking is cancelled.
         fn monitor_gone(&self, id: usize) {
             let removed = {
                 let mut layers = self.layers.borrow_mut();
@@ -477,8 +477,10 @@ mod layers {
             for mut entry in removed {
                 entry.destroy();
             }
-            if self.layers.borrow().is_empty() {
-                self.cancel();
+            // The keyboard may have gone with the layer.
+            match self.active_layer() {
+                Some((active, _)) => self.give_keyboard(active),
+                None => self.cancel(),
             }
         }
     }
@@ -692,6 +694,19 @@ mod layers {
             // Nothing left to mark on.
             let err = glib::MainContext::default().block_on(result).unwrap_err();
             assert!(err.is::<Cancelled>());
+        }
+
+        #[gtk::test]
+        fn a_disconnected_monitor_hands_the_keyboard_to_a_remaining_layer() {
+            let Some((marker, _result, _)) = two_layers(Some(&area_on_right())) else {
+                return;
+            };
+            // The layer with the rectangle holds the keyboard, and goes.
+            assert!(marker.layer(1).unwrap().has_keyboard());
+            marker.inner.monitor_gone(1);
+
+            assert!(marker.layer(1).is_none());
+            assert!(marker.layer(0).unwrap().has_keyboard());
         }
     }
 }
