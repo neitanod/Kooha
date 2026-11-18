@@ -26,8 +26,9 @@ Sources:
                      once permission was granted. Run it from the user's
                      graphical session. Once the stream arrives, it opens a
                      fullscreen window with a ball that bounces inside the
-                     measured area, on the monitor whose physical size matches
-                     the stream (`--no-ball-window` leaves it out). All the
+                     measured area, on the monitor whose logical (within 1
+                     px) or physical (within 2 px) size matches the stream's
+                     reported size (`--no-ball-window` leaves it out). All the
                      variants and frame rates share one session. A pass where
                      the source delivered under 90 % of the requested frames
                      in the `today` variant is marked as discarded: the
@@ -170,18 +171,41 @@ def even(n):
     return n // 2 * 2
 
 
-def crop_props(frame):
-    """videocrop properties that cut AREA out of a frame of the given size."""
+def crop_sides(frame):
+    """videocrop's right and bottom that cut AREA out of a frame of this size."""
     x, y, width, height = AREA
     frame_w, frame_h = frame
-    right = max(0, frame_w - x - width)
-    bottom = max(0, frame_h - y - height)
-    return f"left={x} top={y} right={right} bottom={bottom}"
+    return max(0, frame_w - x - width), max(0, frame_h - y - height)
 
 
-def source_head(source, fps, stream, dmabuf=False):
+def caps_frame(caps):
+    s = caps.get_structure(0)
+    found_w, width = s.get_int("width")
+    found_h, height = s.get_int("height")
+    return (width, height) if found_w and found_h else None
+
+
+def on_caps(element, apply):
+    """Calls `apply(frame)` on the caps that reach `element`'s sink pad, before
+    the element configures itself with them.
+    """
+
+    def probe(_pad, info):
+        event = info.get_event()
+        if event is not None and event.type == Gst.EventType.CAPS:
+            frame = caps_frame(event.parse_caps())
+            if frame is not None:
+                apply(frame)
+        return Gst.PadProbeReturn.OK
+
+    element.get_static_pad("sink").add_probe(
+        Gst.PadProbeType.EVENT_DOWNSTREAM, probe
+    )
+
+
+def source_head(source, fps, stream, dmabuf=False, test_size=TEST_SIZE):
     if source == "test":
-        width, height = TEST_SIZE
+        width, height = test_size
         return (
             "videotestsrc name=source pattern=ball is-live=true ! "
             f"video/x-raw,format=BGRx,width={width},height={height},"
@@ -194,19 +218,20 @@ def source_head(source, fps, stream, dmabuf=False):
     return f"{head} ! video/x-raw(memory:DMABuf)" if dmabuf else head
 
 
-def pipeline_desc(variant, source, fps, stream):
-    frame = TEST_SIZE if source == "test" else stream["size"]
-    crop = f"videocrop {crop_props(frame)}"
+def pipeline_desc(variant, source, fps, stream, test_size=TEST_SIZE, out=None):
+    # right and bottom come from the negotiated frames (build_pipeline): the
+    # portal's `size` may be the logical one, smaller than the frames.
+    crop = f"videocrop name=crop left={AREA[0]} top={AREA[1]}"
     rate = f"videorate name=rate skip-to-first=true ! video/x-raw,framerate={fps}/1"
-    head = source_head(source, fps, stream)
+    head = source_head(source, fps, stream, test_size=test_size)
     flip = "videoflip video-direction=auto"
     plain_src = f"{head} ! {flip} ! {rate}"
     queued_src = f"{head} ! {flip} ! {CAPTURE_QUEUE} ! {rate}"
 
     if variant == "today":
-        width, height = even(frame[0]), even(frame[1])
+        # videoscale to the even size of the frames, set by build_pipeline.
         chain = (
-            f"{plain_src} ! videoscale ! video/x-raw,width={width},height={height} ! "
+            f"{plain_src} ! videoscale name=scale ! capsfilter name=scale-caps ! "
             f"{crop} ! queue name=videoenc-queue ! {X264}"
         )
     elif variant == "crop-first":
@@ -241,8 +266,41 @@ def pipeline_desc(variant, source, fps, stream):
     else:
         raise ValueError(variant)
 
-    sink = f"{MUXER} ! filesink location=/tmp/kooha-bench-{variant}-{fps}.mp4"
-    return f"{chain} ! {sink}"
+    out = out or f"/tmp/kooha-bench-{variant}-{fps}.mp4"
+    return f"{chain} ! {MUXER} ! filesink location={out}"
+
+
+def build_pipeline(variant, source, fps, stream, test_size=TEST_SIZE, out=None):
+    """Builds the variant's pipeline; raises GLib.Error if it does not parse.
+
+    The crop, and in `today` the scale to an even size, follow the caps the
+    frames arrive with, as make_area_crop does in src/pipeline.rs.
+    """
+    pipeline = Gst.parse_launch(
+        pipeline_desc(variant, source, fps, stream, test_size, out)
+    )
+
+    crop = pipeline.get_by_name("crop")
+    if crop is not None:
+
+        def set_crop(frame):
+            right, bottom = crop_sides(frame)
+            crop.set_property("right", right)
+            crop.set_property("bottom", bottom)
+
+        on_caps(crop, set_crop)
+
+    scale = pipeline.get_by_name("scale")
+    if scale is not None:
+        scale_caps = pipeline.get_by_name("scale-caps")
+
+        def set_scale(frame):
+            caps = f"video/x-raw,width={even(frame[0])},height={even(frame[1])}"
+            scale_caps.set_property("caps", Gst.Caps.from_string(caps))
+
+        on_caps(scale, set_scale)
+
+    return pipeline
 
 
 def process_cpu_seconds():
@@ -322,7 +380,7 @@ def bus_error(msg):
 def run_variant(variant, source, fps, seconds, stream):
     result = Result(variant)
     try:
-        pipeline = Gst.parse_launch(pipeline_desc(variant, source, fps, stream))
+        pipeline = build_pipeline(variant, source, fps, stream)
     except GLib.Error as e:
         result.error = f"does not build: {e.message}"
         return result
@@ -599,24 +657,45 @@ def open_region_session(portal):
     return portal.open(SOURCE_MONITOR | SOURCE_VIRTUAL, PERSIST_NONE, "", on_started)
 
 
+def pick_monitor(monitors, stream_size):
+    """The index of the monitor the stream shows, or None.
+
+    `monitors` holds (logical width, logical height, scale) per monitor. The
+    portal may report the stream's size in logical pixels (matched within 1)
+    or physical ones (within 2, for the rounding of a fractional scale).
+    """
+    stream_w, stream_h = stream_size
+
+    def near(size, tolerance):
+        return abs(size[0] - stream_w) <= tolerance and (
+            abs(size[1] - stream_h) <= tolerance
+        )
+
+    for i, (width, height, scale) in enumerate(monitors):
+        physical = (round(width * scale), round(height * scale))
+        if near((width, height), 1) or near(physical, 2):
+            return i
+    return None
+
+
 def ball_window(seconds, stream_size):
-    """Shows a ball bouncing inside AREA, fullscreen on the monitor whose
-    physical size is `stream_size`, so the stream has something that moves.
+    """Shows a ball bouncing inside AREA, fullscreen on the monitor the stream
+    shows (pick_monitor), so the stream has something that moves.
     """
     gi.require_version("Gtk", "4.0")
     from gi.repository import Gdk, Gtk
 
     Gtk.init()
     monitors = Gdk.Display.get_default().get_monitors()
-    monitor = None
-    for i in range(monitors.get_n_items()):
-        candidate = monitors.get_item(i)
-        geometry = candidate.get_geometry()
-        scale = candidate.get_scale()
-        size = (round(geometry.width * scale), round(geometry.height * scale))
-        if size == stream_size:
-            monitor = candidate
-            break
+    candidates = [monitors.get_item(i) for i in range(monitors.get_n_items())]
+    index = pick_monitor(
+        [
+            (m.get_geometry().width, m.get_geometry().height, m.get_scale())
+            for m in candidates
+        ],
+        stream_size,
+    )
+    monitor = None if index is None else candidates[index]
     if monitor is None:
         print(f"No monitor is {stream_size[0]}x{stream_size[1]}; no ball window")
         return
