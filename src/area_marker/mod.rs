@@ -5,3 +5,5 @@
 
 pub mod geometry;
 mod monitor;
+#[cfg(feature = "layer-shell")]
+mod view;
