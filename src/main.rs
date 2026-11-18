@@ -36,6 +36,7 @@ mod capture_warnings;
 mod config;
 mod device;
 mod doctor;
+mod encoder;
 mod experimental;
 mod format;
 mod help;

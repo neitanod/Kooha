@@ -7,6 +7,8 @@ use gtk::{
 use once_cell::sync::OnceCell as OnceLock;
 use serde::Deserialize;
 
+use crate::encoder::H264Encoder;
+
 const DEFAULT_SUGGESTED_MAX_FRAMERATE: gst::Fraction = gst::Fraction::from_integer(60);
 const MAX_THREAD_COUNT: u32 = 64;
 
@@ -227,6 +229,15 @@ impl Profile {
 
         Ok(())
     }
+}
+
+/// Replaces `${H264_ENCODER}` with the chain of `encoder`, then
+/// `${N_THREADS}` with the ideal thread count.
+pub fn expand(description: &str, encoder: H264Encoder) -> String {
+    let ideal_n_threads = glib::num_processors().min(MAX_THREAD_COUNT);
+    description
+        .replace("${H264_ENCODER}", encoder.chain())
+        .replace("${N_THREADS}", &ideal_n_threads.to_string())
 }
 
 fn parse_bin_test(description: &str) -> Result<(), glib::Error> {
