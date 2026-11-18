@@ -62,6 +62,7 @@ Todos desde el worktree del chunk. `CARGO_HOME` y `--target-dir` reusan la cach�
 Meson.
 
 ```bash
+export PKG_CONFIG=/usr/bin/pkg-config                       # el del PATH es el de linuxbrew, sin GTK4 (codex r2 #3)
 export CARGO_HOME=$PWD/_build/cargo-home
 export KOOHA_TEST_RESOURCES=$PWD/_build/data/resources/resources.gresource
 ninja -C _build                                             # build completo; genera los recursos
@@ -87,7 +88,7 @@ llaman `setup_schema()` + `init_resources()` como `src/recording.rs:834-871`.
 **Meson en cada worktree**, con prefijo propio (el binario carga los recursos desde el prefijo):
 
 ```bash
-meson setup _build --prefix=$PWD/_install -Dprofile=development
+PKG_CONFIG=/usr/bin/pkg-config meson setup _build --prefix=$PWD/_install -Dprofile=development
 mkdir -p _build/cargo-home && cp -r $WS/repo/_build/cargo-home/registry _build/cargo-home/
 ```
 
@@ -139,16 +140,17 @@ la interfaz.
 | 2 | Capa de marcado | 2.1–2.5 | 0 (y 1.1, 1.2, 1.4: ver nota) | `src/area_marker/*` | 1 |
 | 3 | Medición y pipeline | 3.1–3.4 | 0 | `tools/`, `docs/perf/`, `src/pipeline.rs` | 1 |
 | 4 | Cámara: mantener los cuadros | 4.1–4.3 | 0 | `Cargo.toml`, `Cargo.lock`, `src/camera_pip/v4l2.rs`, `src/camera_pip/mod.rs`, `src/camera_pip/devices.rs`, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui` | 1 |
-| 5 | Ventana, borde y grabación | 5.1–5.5 | 1, 2, 3 | `src/window/*`, `data/resources/ui/window.ui`, `src/recording.rs`, `src/area_border/mod.rs`, `src/area_border/geometry.rs` | 2 |
+| 5 | Ventana, borde y grabación | 0.5, 5.1–5.5 | 1, 2, 3 | `src/area_marker/*` (sólo la 0.5), `src/window/*`, `data/resources/ui/window.ui`, `src/recording.rs`, `src/area_border/mod.rs`, `src/area_border/geometry.rs` | 2 |
 | 6 | Ventana Rectángulos y bandeja | 6.1–6.4 | 1, 2 (con 5 sólo por los nombres de acción `win.mark-area` y `win.remark-area`) | `src/areas_window.rs`, `data/resources/ui/areas_window.ui`, `data/resources/resources.gresource.xml`, `src/tray/*`, `src/application.rs`, `src/main.rs` (una línea `mod areas_window;`) | 2 |
-| 7 | Codificador | 7.1–7.5 | 3, 4, 5 | `src/encoder.rs`, `src/profile.rs`, `data/resources/profiles.yml`, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/doctor/checks.rs`, `src/pipeline.rs`, `src/recording.rs` (sólo `CaptureConfig`), `src/main.rs` (una línea `mod encoder;`) | 3 |
+| 7 | Codificador | 7.1–7.5 | 3, 4, 5 | `src/encoder.rs`, `src/profile.rs`, `data/resources/profiles.yml`, `src/preferences_dialog.rs`, `data/resources/ui/preferences_dialog.ui`, `src/doctor/checks.rs`, `src/doctor/mod.rs`, `src/pipeline.rs`, `src/recording.rs` (sólo `CaptureConfig`), `src/main.rs` (una línea `mod encoder;`) | 3 |
 | 8 | Traducciones e integración final (orquestador) | 8.1–8.2 | todos | `po/es.po`, `po/POTFILES.in`, `README.md` | 4 |
 
 **Chunk 2 y chunk 1 en la misma tanda (fable r1 #5):** el chunk 2 necesita la conversión
 lógico↔físico, `describe()` y la lista de monitores del chunk 1. Para no frenar la tanda, el
 chunk 2 trabaja con helpers privados equivalentes y recibe `name_exists: impl Fn(&str) -> bool`
 en `save_dialog::ask`; la **tarea 0.5** del orquestador, entre la tanda 1 y la 2, borra esos
-helpers y deja una sola conversión, la de `areas::model`.
+helpers y deja una sola conversión, la de `areas::model`. La 0.5 la hace el chunk 5 antes que
+nada, porque es el único de la tanda 2 que toca `src/area_marker/`.
 
 **El chunk 7 pasa a la tanda 3** (fable r1 #9): resuelve el codificador en `CaptureConfig`
 (`src/recording.rs`), que es del chunk 5 en la tanda 2.
@@ -1010,7 +1012,9 @@ stream → `Other`. Dos monitores del mismo tamaño dan `Same` con aviso en el l
 
 **Archivos:** `src/application.rs`.
 
-- [ ] Test: `app.show-areas` está registrada después de `startup`.
+- [ ] Test: `app.show-areas` queda registrada al llamar `setup_gactions()` (como el test existente
+  de `show-requirements-report`), sin `startup`: `startup` registra la bandeja en el D-Bus real
+  (codex r2 #6).
 - [ ] Acción `app.show-areas` que abre
   (o presenta, si ya está abierta) la ventana Rectángulos con la ventana principal como padre.
 
@@ -1022,8 +1026,10 @@ stream → `Other`. Dos monitores del mismo tamaño dan `Same` con aviso en el l
 `adw::Window` (modal no) con `adw::HeaderBar` título «Areas», y un `gtk::ListBox` con clase
 `boxed-list`: una `adw::ActionRow` por área guardada, título = nombre, subtítulo =
 `describe()` y «· chosen» si es la elegida, o el motivo de `staleness` con clase `warning`.
-Sufijos: «Choose» (deshabilitado si está elegida o desactualizada), renombrar (abre un
-`adw::AlertDialog` con `adw::EntryRow` precargada; `NameTaken` → mensaje en el diálogo),
+Sufijos: «Choose» (deshabilitado si está elegida o desactualizada), renombrar **en línea**, como dice
+la spec §2 (codex r2 #12): el título de la fila pasa a un `gtk::EditableLabel` en modo edición;
+Enter confirma, Escape cancela, y `NameTaken` deja el campo en edición con la clase `error` y el
+tooltip «There is already an area called “{name}”»,
 «Mark Again» (siempre habilitado, también con el monitor desconectado: P10; activa
 `win.remark-area` con el nombre en la ventana principal, que precarga si el monitor está y si no
 marca desde cero), borrar (confirmación
@@ -1041,10 +1047,14 @@ los cambios de monitores.
 
 **Archivos:** `src/tray/model.rs`, `src/tray/service.rs`, `src/application.rs`.
 
-- [ ] `TrayCommand` deja de ser `Copy` (pasa a `Clone`; `KoohaTray::send` clona o loguea antes
-  de mover el comando al `TrayRequest`) y suma `SelectArea(Selected)`,
+- [ ] `TrayCommand` deja de ser `Copy` (pasa a `Clone`) y suma `SelectArea(Selected)`,
   `MarkArea` y `ToggleAreaBorder`. `TrayModel` suma `areas: Vec<(String /*label*/, Selected,
   bool /*enabled*/, bool /*chosen*/)>` y `show_area_border: bool`.
+- [ ] Los callbacks `activate` de ksni son `Fn` (`ksni-0.3.7/src/menu/mod.rs:148` y `:366`) y hoy
+  hacen `tray.send(command)` moviendo el valor (`src/tray/service.rs:161` y `:174`): sin `Copy`,
+  clonan el comando en cada invocación (`tray.send(command.clone())`), y `KoohaTray::send` loguea
+  antes de mover el comando al `TrayRequest` (codex r2 #2). Test: dos activaciones seguidas del
+  mismo ítem mandan dos comandos.
 - [ ] `TrayEntry` suma `SubMenu { label, children: Vec<TrayEntry> }` y `Radio { label, command,
   enabled, selected }`. `menu_entries` agrega, después de los toggles de captura, el submenú
   «Area» (radios + separador + «Mark New Area…») y la casilla «Show Area Border». Sin capas
@@ -1172,7 +1182,9 @@ la cadena cruda. Test: `Cpu.works((1280, 720))` pasa.
   `every_element_has_a_package` lo exige). Confirmar el paquete de cada uno con `dpkg -S` sobre
   el `.so` de los plugins `va` y `nvcodec`.
 - [ ] Chequeo nuevo «Hardware video encoders», con su test que falla primero: informa cuáles
-  de Intel y NVIDIA pasan la prueba previa. Las fallas son advertencias (Kooha sigue grabando
+  de Intel y NVIDIA pasan la prueba previa. `doctor::run()` arma la lista a mano
+  (`src/doctor/mod.rs:123-156`): el chequeo se agrega ahí, y un test verifica que el `Report` lo
+  contiene (codex r2 #11). Las fallas son advertencias (Kooha sigue grabando
   con CPU), con el paquete a instalar en el comando.
 - [ ] Commit `feat: report the hardware encoders in the requirements check`.
 
@@ -1206,7 +1218,7 @@ cierre lo dice (P12 lo había elegido).
   ruta bajo el temporal.
 - [ ] Commit `feat: load the saved areas at startup`.
 
-## Tarea 0.5 (orquestador, entre la tanda 1 y la tanda 2): una sola conversión
+## Tarea 0.5 (la hace el chunk 5, primero): una sola conversión
 
 - [ ] Borrar de `src/area_marker/` los helpers privados de conversión lógico↔físico, de
   `describe()` y de la lista de monitores, y usar `areas::model` y `areas::monitors`. Los tests
@@ -1232,6 +1244,10 @@ cierre lo dice (P12 lo había elegido).
 - [ ] Suite, clippy y fmt en los dos modos; comando de atribución vacío.
 
 ### Prueba de la etapa 8 (orquestador, con `run-dev.sh` y `KOOHA_MARKER_TIMEOUT_SECS=60`)
+
+Las primeras pruebas con capas corren bajo un supervisor externo que mata el proceso aunque esté
+colgado (codex r2 #4): `timeout --signal=KILL 120 $WS/run-dev.sh <worktree>`. El temporizador
+interno queda como segunda protección.
 
 Cada criterio de aceptación de la spec, en la sesión KDE real. El criterio 14 (sin capas) en el
 Xvfb aislado con `GDK_BACKEND=x11` y `dbus-run-session` (sin portal): se comprueba que la fila
