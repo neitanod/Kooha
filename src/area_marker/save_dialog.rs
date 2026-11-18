@@ -74,25 +74,13 @@ fn choice_for(name: &str, exists: bool, replace_answer: Option<bool>) -> Decisio
     }
 }
 
-/// «1280×720 on DP-3».
-fn describe(area: &MarkedArea) -> String {
-    gettext_f(
-        "{width}×{height} on {connector}",
-        &[
-            ("width", &area.width.to_string()),
-            ("height", &area.height.to_string()),
-            ("connector", &area.connector),
-        ],
-    )
-}
-
 /// The first dialog, with `name` in its field.
 fn save_dialog(area: &MarkedArea, name: &str) -> (adw::AlertDialog, adw::EntryRow) {
     let body = gettext_f(
         "Top left at {x}, {y}",
         &[("x", &area.x.to_string()), ("y", &area.y.to_string())],
     );
-    let dialog = adw::AlertDialog::new(Some(&describe(area)), Some(&body));
+    let dialog = adw::AlertDialog::new(Some(&area.describe()), Some(&body));
     dialog.add_responses(&[
         ("remark", &gettext("Mark Again")),
         ("done", &gettext("Done")),
@@ -124,7 +112,7 @@ fn replace_dialog(name: &str, area: &MarkedArea) -> adw::AlertDialog {
     );
     let body = gettext_f(
         "Replace it with this one, {area}?",
-        &[("area", &describe(area))],
+        &[("area", &area.describe())],
     );
     let dialog = adw::AlertDialog::new(Some(&heading), Some(&body));
     dialog.add_responses(&[
@@ -192,7 +180,7 @@ mod tests {
 
     #[test]
     fn area_is_described_by_size_and_monitor() {
-        assert_eq!(describe(&area()), "1280×720 on DP-3");
+        assert_eq!(area().describe(), "1280×720 on DP-3");
     }
 
     /// Built, never presented.

@@ -165,26 +165,46 @@ impl Staleness {
     }
 }
 
+/// Sebastián's monitors, as GDK reports them (`kscreen-doctor -o`,
+/// 17/11/2026), for the tests of every module.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod test_monitors {
+    use super::MonitorInfo;
 
-    fn edp() -> MonitorInfo {
+    /// The notebook panel: 2560x1600 at 1.75.
+    pub fn edp() -> MonitorInfo {
         MonitorInfo {
             connector: "eDP-1".into(),
-            // As GDK reports the notebook panel: 2560x1600 at 1.75.
             logical: (457, 1080, 1463, 914),
             scale: 1.75,
         }
     }
 
-    fn dp3() -> MonitorInfo {
+    /// 1680x1050 at 1.05.
+    pub fn dp3() -> MonitorInfo {
         MonitorInfo {
             connector: "DP-3".into(),
             logical: (1920, 454, 1600, 1000),
             scale: 1.05,
         }
     }
+
+    /// 1920x1080 at 1.
+    pub fn hdmi() -> MonitorInfo {
+        MonitorInfo {
+            connector: "HDMI-A-1".into(),
+            logical: (0, 0, 1920, 1080),
+            scale: 1.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        test_monitors::{dp3, edp},
+        *,
+    };
 
     #[test]
     fn physical_size_rounds_logical_times_scale() {

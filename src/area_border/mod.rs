@@ -8,6 +8,7 @@ use gtk::{gdk, prelude::*};
 
 use self::geometry::{BorderGeometry, border_geometry};
 use crate::{
+    areas::{MarkedArea, MonitorInfo},
     pipeline::Crop,
     screencast_portal::{SourceType, Stream},
 };
@@ -84,6 +85,38 @@ pub fn for_streams(streams: &[Stream], crop: Crop) -> Option<(BorderGeometry, gd
     Some((border, monitors[index].clone()))
 }
 
+/// The border of a marked `area`, with the monitor it goes on, if that
+/// monitor is among `monitors` and connected.
+pub fn for_area(
+    area: &MarkedArea,
+    monitors: &[MonitorInfo],
+) -> Option<(BorderGeometry, gdk::Monitor)> {
+    let border = border_for_area(area, monitors)?;
+    let display = gdk::Display::default()?;
+    let monitor = crate::areas::monitors::monitor_for(&display, &area.connector)?;
+    Some((border, monitor))
+}
+
+/// The border of a marked `area` on its monitor among `monitors`.
+fn border_for_area(area: &MarkedArea, monitors: &[MonitorInfo]) -> Option<BorderGeometry> {
+    let monitor = monitors
+        .iter()
+        .find(|monitor| monitor.connector == area.connector)?;
+    border_geometry(crop_for_area(area), monitor.logical)
+}
+
+/// What `videocrop` would cut to record `area` from a stream of its whole
+/// monitor, at the physical size it was marked on.
+fn crop_for_area(area: &MarkedArea) -> Crop {
+    Crop {
+        top: area.y,
+        left: area.x,
+        right: area.monitor_width - area.x - area.width,
+        bottom: area.monitor_height - area.y - area.height,
+        frame: (area.monitor_width, area.monitor_height),
+    }
+}
+
 /// A monitor as its logical rectangle (x, y, w, h) and its scale factor.
 type Monitor = ((i32, i32, i32, i32), f64);
 
@@ -135,6 +168,51 @@ fn stream_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::areas::model::test_monitors::{dp3, edp};
+
+    fn area_on_dp3() -> MarkedArea {
+        MarkedArea {
+            connector: "DP-3".into(),
+            x: 105,
+            y: 84,
+            width: 1260,
+            height: 714,
+            monitor_width: 1680,
+            monitor_height: 1050,
+            scale: 1.05,
+        }
+    }
+
+    #[test]
+    fn crop_for_area_cuts_around_the_area() {
+        assert_eq!(
+            crop_for_area(&area_on_dp3()),
+            Crop {
+                top: 84,
+                left: 105,
+                right: 315,
+                bottom: 252,
+                frame: (1680, 1050),
+            }
+        );
+    }
+
+    #[test]
+    fn border_of_an_area_is_in_logical_pixels_of_its_monitor() {
+        let border = border_for_area(&area_on_dp3(), &[edp(), dp3()]).unwrap();
+
+        // 105, 84, 1260x714 physical at 1.05 is 100, 80, 1200x680 logical.
+        let (x, y, w, h) = border.area;
+        for (got, want) in [(x, 100.0), (y, 80.0), (w, 1200.0), (h, 680.0)] {
+            assert!((got - want).abs() < 0.01, "{:?}", border.area);
+        }
+        assert_eq!(border.sides, [true; 4]);
+    }
+
+    #[test]
+    fn no_border_for_an_area_on_a_disconnected_monitor() {
+        assert_eq!(border_for_area(&area_on_dp3(), &[edp()]), None);
+    }
 
     const LEFT_MONITOR: Monitor = ((0, 0, 1920, 1080), 1.0);
     const RIGHT_MONITOR: Monitor = ((1920, 454, 1600, 1000), 1.05);

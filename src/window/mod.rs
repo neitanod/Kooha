@@ -1,3 +1,4 @@
+mod area_row;
 mod progress_icon;
 mod toggle_button;
 
@@ -5,16 +6,27 @@ use adw::{prelude::*, subclass::prelude::*};
 use anyhow::{Error, Result};
 use gettextrs::gettext;
 use gtk::{
-    gio,
+    gdk, gio,
     glib::{self, clone},
 };
 
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    fmt,
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+};
 
 use self::{progress_icon::ProgressIcon, toggle_button::ToggleButton};
 use crate::{
     Application,
-    area_border::AreaBorder,
+    area_border::{self, AreaBorder, geometry::BorderGeometry},
+    area_marker::{
+        self,
+        save_dialog::{self, SaveChoice},
+    },
+    areas::{self, MarkedArea},
     camera_pip::{self, devices::CameraSource},
     cancelled::Cancelled,
     capture_warnings::{CaptureWarnings, WarningsNotifier},
@@ -23,13 +35,49 @@ use crate::{
     help::ContextWithHelp,
     overlay,
     preferences_dialog::PreferencesDialog,
-    recording::{NoProfileError, Recording, RecordingState},
+    recording::{
+        NoProfileError, Recording, RecordingState, StaleArea, WrongMonitor, needs_marking,
+    },
     settings::CaptureMode,
 };
 
 /// What the tray shows of the window's recording: its state, its duration
 /// and its capture warnings.
 pub type RecordingSnapshot = (RecordingState, gst::ClockTime, CaptureWarnings);
+
+/// What a marking is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkTarget {
+    /// A new area, which the user may save with a name.
+    New,
+    /// New geometry for the saved area of this name.
+    Replace(String),
+}
+
+/// Marks an area on the screen, starting from the given one; tests replace
+/// `area_marker::mark` with it.
+pub type Marker =
+    Rc<dyn Fn(Option<MarkedArea>) -> Pin<Box<dyn Future<Output = Result<MarkedArea>>>>>;
+
+#[derive(Default)]
+struct MarkerHook(Option<Marker>);
+
+/// The area border on screen, with what it was built from.
+#[derive(Debug)]
+struct ShownBorder {
+    // Dropping it destroys the layer.
+    _layer: AreaBorder,
+    geometry: BorderGeometry,
+    connector: Option<String>,
+}
+
+impl fmt::Debug for MarkerHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("MarkerHook")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
 
 mod imp {
     use super::*;
@@ -38,13 +86,23 @@ mod imp {
     #[template(resource = "/io/github/seadve/Kooha/ui/window.ui")]
     pub struct Window {
         #[template_child]
+        pub(super) toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
         pub(super) title: TemplateChild<adw::WindowTitle>,
         #[template_child]
         pub(super) stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub(super) main_page: TemplateChild<adw::ToolbarView>,
         #[template_child]
+        pub(super) area_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub(super) area_dropdown: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub(super) mark_area_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub(super) camera_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub(super) start_record_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub(super) forget_video_sources_revealer: TemplateChild<gtk::Revealer>,
         #[template_child]
@@ -73,8 +131,16 @@ mod imp {
         pub(super) recording: RefCell<Option<(Recording, Vec<glib::SignalHandlerId>)>>,
         /// The last whole second of the recording duration sent to the tray.
         pub(super) tray_duration_secs: Cell<u64>,
-        /// The border of the recorded area, while it is on screen.
-        pub(super) area_border: RefCell<Option<AreaBorder>>,
+        /// The border of the chosen or the recorded area, while it is on
+        /// screen.
+        pub(super) area_border: RefCell<Option<ShownBorder>>,
+        /// What each entry of the areas dropdown chooses.
+        pub(super) area_items: RefCell<Vec<areas::Selected>>,
+        /// The dropdown is being refilled: its selection is not the user's.
+        pub(super) updating_area_dropdown: Cell<bool>,
+        /// An area is being marked.
+        pub(super) marking: Cell<bool>,
+        pub(super) marker: RefCell<MarkerHook>,
     }
 
     #[glib::object_subclass]
@@ -91,6 +157,21 @@ mod imp {
             klass.install_action_async("win.toggle-record", None, |obj, _, _| async move {
                 obj.toggle_record().await;
             });
+
+            klass.install_action_async("win.mark-area", None, |obj, _, _| async move {
+                obj.mark_area(MarkTarget::New).await;
+            });
+
+            klass.install_action_async(
+                "win.remark-area",
+                Some(glib::VariantTy::STRING),
+                |obj, _, name| async move {
+                    let Some(name) = name.and_then(|name| name.get::<String>()) else {
+                        return;
+                    };
+                    obj.mark_area(MarkTarget::Replace(name)).await;
+                },
+            );
 
             klass.install_action("win.toggle-pause", None, move |obj, _, _| {
                 if let Err(err) = obj.toggle_pause() {
@@ -128,6 +209,7 @@ mod imp {
 
             obj.setup_settings();
             obj.setup_camera_button();
+            obj.setup_areas();
 
             obj.update_view();
             obj.update_title_label();
@@ -195,6 +277,98 @@ glib::wrapper! {
 impl Window {
     pub fn new(app: &Application) -> Self {
         glib::Object::builder().property("application", app).build()
+    }
+
+    pub fn add_toast(&self, toast: adw::Toast) {
+        self.imp().toast_overlay.add_toast(toast);
+    }
+
+    /// Marks an area for `target` and saves it in the store: a new one as
+    /// the last area or with a name, or the new geometry of a saved one.
+    /// Returns `None` if the marking was cancelled, or if another was open.
+    ///
+    /// This is the only caller of `area_marker::mark`. While it runs,
+    /// neither marking nor recording can start.
+    pub async fn mark_area(&self, target: MarkTarget) -> Option<MarkedArea> {
+        let imp = self.imp();
+        if imp.marking.replace(true) {
+            tracing::debug!("An area is already being marked");
+            return None;
+        }
+        self.update_actions();
+
+        let marked = self.mark_area_inner(target).await;
+
+        imp.marking.set(false);
+        self.update_actions();
+        marked
+    }
+
+    async fn mark_area_inner(&self, target: MarkTarget) -> Option<MarkedArea> {
+        let store = Application::get().area_store();
+
+        match target {
+            MarkTarget::New => {
+                let mut initial = store.selected_area().map(|chosen| chosen.area);
+                loop {
+                    let area = self.run_marker(initial.take()).await?;
+
+                    // The dialog goes on the window, which may be minimized
+                    // if the marking came from the tray.
+                    self.present();
+                    match save_dialog::ask(self, &area, |name| store.contains(name)).await {
+                        SaveChoice::Last => store.set_last(area.clone()),
+                        SaveChoice::Named(name) => {
+                            // The dialog already asked whether to replace it.
+                            if let Err(err) = store.save_named(&name, area.clone(), true) {
+                                tracing::error!("Failed to save area: {:?}", err);
+                            }
+                        }
+                        SaveChoice::MarkAgain => {
+                            initial = Some(area);
+                            continue;
+                        }
+                    }
+                    return Some(area);
+                }
+            }
+            MarkTarget::Replace(name) => {
+                let Some(saved) = store.areas().into_iter().find(|saved| saved.name == name) else {
+                    tracing::warn!("Can't mark missing area {:?} again", name);
+                    return None;
+                };
+                let area = self.run_marker(Some(saved.area)).await?;
+                store.replace_geometry(&name, area.clone());
+                Some(area)
+            }
+        }
+    }
+
+    /// The area marked on the screen, or `None` if cancelled or failed.
+    async fn run_marker(&self, initial: Option<MarkedArea>) -> Option<MarkedArea> {
+        let marker = self.imp().marker.borrow().0.clone();
+        let result = match marker {
+            Some(marker) => marker(initial).await,
+            None => area_marker::mark(initial).await,
+        };
+
+        match result {
+            Ok(area) => Some(area),
+            Err(err) if err.is::<Cancelled>() => {
+                tracing::debug!("{:?}", err);
+                None
+            }
+            Err(err) => {
+                tracing::error!("Failed to mark an area: {:?}", err);
+                self.add_toast(adw::Toast::new(&err.to_string()));
+                None
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_marker(&self, marker: Marker) {
+        self.imp().marker.replace(MarkerHook(Some(marker)));
     }
 
     /// Returns `true` if the window is busy with a recording.
@@ -415,6 +589,17 @@ impl Window {
             return;
         }
 
+        // In Selection mode with no area chosen, mark one first (P1).
+        let has_area = Application::get().area_store().selected_area().is_some();
+        if needs_marking(
+            Application::get().settings().capture_mode(),
+            overlay::availability().is_ok(),
+            has_area,
+        ) && self.mark_area(MarkTarget::New).await.is_none()
+        {
+            return;
+        }
+
         let recording = Recording::new();
         imp.warnings_notifier.reset();
         let handler_ids = vec![
@@ -464,6 +649,13 @@ impl Window {
                 self,
                 move |recording, res| {
                     obj.handle_recording_finished(recording, res);
+                }
+            )),
+            recording.connect_notice(clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_, message| {
+                    obj.add_toast(adw::Toast::new(message));
                 }
             )),
         ];
@@ -548,6 +740,16 @@ impl Window {
                     tracing::debug!("{:?}", err);
                 } else if err.is::<NoProfileError>() {
                     self.present_no_profile_error_dialog();
+                } else if let Some(stale) = err.downcast_ref::<StaleArea>() {
+                    tracing::debug!("{:?}", err);
+                    // The toast is on the window, which may be minimized if
+                    // the recording started from the tray.
+                    self.present();
+                    self.add_toast(self.stale_area_toast(stale));
+                } else if let Some(wrong) = err.downcast_ref::<WrongMonitor>() {
+                    tracing::debug!("{:?}", err);
+                    self.present();
+                    self.add_toast(adw::Toast::new(&wrong.to_string()));
                 } else {
                     tracing::error!("{:?}", err);
 
@@ -572,6 +774,32 @@ impl Window {
         }
     }
 
+    /// «The area “Demo” is out of date: DP-3 is not connected», with a
+    /// button to mark it again.
+    fn stale_area_toast(&self, stale: &StaleArea) -> adw::Toast {
+        let toast = adw::Toast::builder()
+            .title(stale.message())
+            .button_label(gettext("Mark Again"))
+            .timeout(0)
+            .build();
+        let target = stale_area_target(stale);
+        toast.connect_button_clicked(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                let target = target.clone();
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    obj,
+                    async move {
+                        obj.mark_area(target).await;
+                    }
+                ));
+            }
+        ));
+        toast
+    }
+
     fn update_inhibit(&self) {
         let imp = self.imp();
 
@@ -594,16 +822,29 @@ impl Window {
         }
     }
 
+    fn recording_state(&self) -> RecordingState {
+        self.imp()
+            .recording
+            .borrow()
+            .as_ref()
+            .map_or(RecordingState::Init, |(recording, _)| recording.state())
+    }
+
+    /// Enables the recording and marking actions for the recording state
+    /// and whether an area is being marked.
+    fn update_actions(&self) {
+        let enabled = area_row::enabled_actions(self.recording_state(), self.imp().marking.get());
+        self.action_set_enabled("win.toggle-record", enabled.toggle_record);
+        self.action_set_enabled("win.mark-area", enabled.mark_area);
+        self.action_set_enabled("win.remark-area", enabled.mark_area);
+    }
+
     fn update_view(&self) {
         let imp = self.imp();
 
         // TODO disregard ms granularity recording state change
 
-        let state = imp
-            .recording
-            .borrow()
-            .as_ref()
-            .map_or(RecordingState::Init, |(recording, _)| recording.state());
+        let state = self.recording_state();
 
         match state {
             RecordingState::Init | RecordingState::Finished => {
@@ -643,15 +884,9 @@ impl Window {
 
         self.update_warnings_boxes();
         self.update_tray();
-        self.update_area_border(state);
+        self.update_area_border();
 
-        self.action_set_enabled(
-            "win.toggle-record",
-            !matches!(
-                state,
-                RecordingState::Delayed { .. } | RecordingState::Flushing { .. }
-            ),
-        );
+        self.update_actions();
         self.action_set_enabled(
             "win.toggle-pause",
             matches!(state, RecordingState::Recording | RecordingState::Paused),
@@ -665,39 +900,66 @@ impl Window {
         );
     }
 
-    /// Shows the border of the recorded area during the countdown, the
-    /// recording and the pause (P14), once per recording; removes it in any
-    /// other state.
-    fn update_area_border(&self, state: RecordingState) {
+    /// Shows the border of the chosen area before recording (P8), and of
+    /// the recorded area during the countdown, the recording and the pause
+    /// (P14); removes it otherwise. The same border on the same monitor
+    /// stays on screen, from the chosen area to the recording.
+    fn update_area_border(&self) {
         let imp = self.imp();
+        let app = Application::get();
+        let settings = app.settings();
 
-        if !shows_area_border(state) {
-            // Dropping it destroys the layer.
+        let monitors = current_monitors();
+        let fresh_area = app
+            .area_store()
+            .selected_area()
+            .filter(|chosen| chosen.area.staleness(&monitors).is_none());
+        let source = area_row::border_source(
+            self.recording_state(),
+            settings.capture_mode() == CaptureMode::Selection,
+            settings.show_area_border(),
+            fresh_area.is_some(),
+            overlay::availability().is_ok(),
+        );
+
+        let wanted = match source {
+            area_row::BorderSource::None => None,
+            area_row::BorderSource::Recording => imp
+                .recording
+                .borrow()
+                .as_ref()
+                .and_then(|(recording, _)| recording.area_border()),
+            area_row::BorderSource::Idle => {
+                fresh_area.and_then(|chosen| area_border::for_area(&chosen.area, &monitors))
+            }
+        };
+        let Some((geometry, monitor)) = wanted else {
             imp.area_border.take();
-            return;
-        }
-
-        if imp.area_border.borrow().is_some() {
-            return;
-        }
-
-        let Some((border, monitor)) = imp
-            .recording
-            .borrow()
-            .as_ref()
-            .and_then(|(recording, _)| recording.area_border())
-        else {
             return;
         };
 
-        if let Err(reason) = overlay::availability() {
-            tracing::debug!(?reason, "No area border: overlays are unavailable");
+        let connector = monitor.connector().map(String::from);
+        if imp
+            .area_border
+            .borrow()
+            .as_ref()
+            .is_some_and(|shown| shown.geometry == geometry && shown.connector == connector)
+        {
             return;
         }
 
-        let area_border = AreaBorder::new(border, &monitor);
-        area_border.present();
-        imp.area_border.replace(Some(area_border));
+        // The old layer goes before the new one comes.
+        imp.area_border.take();
+        let layer = AreaBorder::new(geometry, &monitor);
+        // Tests never draw on the screen.
+        if !cfg!(test) {
+            layer.present();
+        }
+        imp.area_border.replace(Some(ShownBorder {
+            _layer: layer,
+            geometry,
+            connector,
+        }));
     }
 
     fn update_warnings_boxes(&self) {
@@ -775,6 +1037,16 @@ impl Window {
             self,
             move |_| {
                 obj.update_title_label();
+                obj.update_area_row_visibility();
+                obj.update_area_border();
+            }
+        ));
+
+        settings.connect_show_area_border_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.update_area_border();
             }
         ));
 
@@ -809,6 +1081,133 @@ impl Window {
         self.add_action(&settings.create_capture_mode_action());
         self.add_action(&settings.create_camera_enabled_action());
         self.add_action(&settings.create_camera_device_action());
+        self.add_action(&settings.create_show_area_border_action());
+    }
+
+    /// Fills the areas row and keeps it up to date, and shows the notices
+    /// of the saved areas as toasts.
+    fn setup_areas(&self) {
+        let imp = self.imp();
+        let store = Application::get().area_store();
+
+        imp.area_dropdown.connect_selected_notify(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |dropdown| {
+                let imp = obj.imp();
+                if imp.updating_area_dropdown.get() {
+                    return;
+                }
+                let selected = usize::try_from(dropdown.selected())
+                    .ok()
+                    .and_then(|index| imp.area_items.borrow().get(index).cloned());
+                // After the notification: the store change refills the
+                // dropdown, and a new model while the dropdown notifies its
+                // own selection hangs GTK.
+                if let Some(selected) = selected {
+                    glib::idle_add_local_once(move || {
+                        Application::get().area_store().select(Some(selected));
+                    });
+                }
+            }
+        ));
+        store.connect_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.update_area_dropdown();
+                obj.update_area_border();
+            }
+        ));
+        if let Some(display) = gdk::Display::default() {
+            // The handlers live as long as the display: only a weak
+            // reference to the window.
+            let obj = self.downgrade();
+            areas::monitors::watch(&display, move || {
+                if let Some(obj) = obj.upgrade() {
+                    obj.update_area_dropdown();
+                    obj.update_area_border();
+                }
+            });
+        }
+
+        let controller = gtk::ShortcutController::new();
+        controller.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>b"),
+            Some(gtk::NamedAction::new("win.show-area-border")),
+        ));
+        self.add_controller(controller);
+
+        self.update_area_row_visibility();
+        self.update_area_dropdown();
+
+        if let Some(notice) = area_row::notice_for_store(&store) {
+            self.add_toast(adw::Toast::new(&notice));
+        }
+        store.connect_save_failed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_, message| {
+                obj.add_toast(adw::Toast::new(message));
+            }
+        ));
+    }
+
+    /// The areas row shows in Selection mode, when the marker can show its
+    /// layers (ADR 0004).
+    fn update_area_row_visibility(&self) {
+        let selection = Application::get().settings().capture_mode() == CaptureMode::Selection;
+        self.imp()
+            .area_row
+            .set_visible(selection && overlay::availability().is_ok());
+    }
+
+    /// Refills the areas dropdown from the store, with the chosen area
+    /// selected.
+    fn update_area_dropdown(&self) {
+        let imp = self.imp();
+        let store = Application::get().area_store();
+
+        let items =
+            area_row::dropdown_items(&store.areas(), store.last().as_ref(), &current_monitors());
+        let selected = store.selected();
+        let position = items
+            .iter()
+            .position(|(_, item, _)| Some(item) == selected.as_ref())
+            .and_then(|position| u32::try_from(position).ok())
+            .unwrap_or(gtk::INVALID_LIST_POSITION);
+        let labels = items
+            .iter()
+            .map(|(label, _, _)| label.as_str())
+            .collect::<Vec<_>>();
+
+        // Keep the model, and what the popover shows, when only the choice
+        // changed.
+        let same_labels = imp
+            .area_dropdown
+            .model()
+            .and_downcast::<gtk::StringList>()
+            .is_some_and(|model| {
+                model.n_items() as usize == labels.len()
+                    && labels
+                        .iter()
+                        .zip(0..)
+                        .all(|(label, index)| model.string(index).as_deref() == Some(*label))
+            });
+
+        imp.updating_area_dropdown.set(true);
+        if !same_labels {
+            imp.area_dropdown
+                .set_model(Some(&gtk::StringList::new(&labels)));
+        }
+        if imp.area_dropdown.selected() != position {
+            imp.area_dropdown.set_selected(position);
+        }
+        imp.area_dropdown.set_sensitive(!items.is_empty());
+        imp.updating_area_dropdown.set(false);
+
+        imp.area_items
+            .replace(items.into_iter().map(|(_, item, _)| item).collect());
     }
 
     fn setup_camera_button(&self) {
@@ -832,6 +1231,22 @@ impl Window {
     }
 }
 
+/// A saved area out of date is marked again with its name; the last area
+/// is marked anew.
+fn stale_area_target(stale: &StaleArea) -> MarkTarget {
+    stale
+        .name
+        .clone()
+        .map_or(MarkTarget::New, MarkTarget::Replace)
+}
+
+/// The connected monitors, or none without a display.
+fn current_monitors() -> Vec<areas::MonitorInfo> {
+    gdk::Display::default()
+        .map(|display| areas::monitors::current(&display))
+        .unwrap_or_default()
+}
+
 /// The camera button menu: the on/off toggle and one radio item per source.
 fn camera_menu(sources: &[CameraSource]) -> gio::Menu {
     let toggle_section = gio::Menu::new();
@@ -850,15 +1265,6 @@ fn camera_menu(sources: &[CameraSource]) -> gio::Menu {
     menu
 }
 
-/// Whether the border of the recorded area is on screen in `state`: during
-/// the countdown, the recording and the pause (P14).
-fn shows_area_border(state: RecordingState) -> bool {
-    matches!(
-        state,
-        RecordingState::Delayed { .. } | RecordingState::Recording | RecordingState::Paused
-    )
-}
-
 /// One label per capture warning, styled as a chip.
 fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
     warnings
@@ -874,8 +1280,17 @@ fn warning_chips(warnings: CaptureWarnings) -> Vec<gtk::Label> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::{Future, poll_fn},
+        pin::{Pin, pin},
+        rc::Rc,
+        task::Poll,
+    };
+
+    use futures_channel::oneshot;
+
     use super::*;
-    use crate::camera_pip::devices::CameraSource;
+    use crate::{areas::Selected, camera_pip::devices::CameraSource};
 
     #[gtk::test]
     fn warning_chips_have_one_label_per_warning() {
@@ -896,21 +1311,77 @@ mod tests {
     }
 
     #[test]
-    fn area_border_shows_from_countdown_until_stop() {
-        for state in [
-            RecordingState::Delayed { secs_left: 3 },
-            RecordingState::Recording,
-            RecordingState::Paused,
-        ] {
-            assert!(shows_area_border(state), "{state:?}");
+    fn stale_area_is_marked_again_by_name() {
+        let stale = |name: Option<&str>| StaleArea {
+            name: name.map(String::from),
+            reason: "DP-3 is not connected".into(),
+        };
+        assert_eq!(
+            stale_area_target(&stale(Some("Demo"))),
+            MarkTarget::Replace("Demo".into())
+        );
+        assert_eq!(stale_area_target(&stale(None)), MarkTarget::New);
+    }
+
+    #[gtk::test]
+    fn stale_area_toast_offers_to_mark_again() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+
+        let toast = window.stale_area_toast(&StaleArea {
+            name: Some("Demo".into()),
+            reason: "DP-3 is not connected".into(),
+        });
+
+        assert_eq!(
+            toast.title().as_deref(),
+            Some("The area “Demo” is out of date: DP-3 is not connected")
+        );
+        assert_eq!(toast.button_label().as_deref(), Some("Mark Again"));
+        assert_eq!(toast.timeout(), 0);
+    }
+
+    /// The border is built, never presented.
+    #[gtk::test]
+    fn chosen_area_border_follows_mode_and_setting() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        if overlay::availability().is_err() {
+            eprintln!("Skipped: layers unavailable");
+            return;
         }
-        for state in [
-            RecordingState::Init,
-            RecordingState::Flushing { progress: 50 },
-            RecordingState::Finished,
-        ] {
-            assert!(!shows_area_border(state), "{state:?}");
-        }
+        let Some(monitor) = current_monitors().into_iter().next() else {
+            eprintln!("Skipped: no monitor");
+            return;
+        };
+        let app = Application::get();
+        let settings = app.settings();
+        let store = app.area_store();
+        let (monitor_width, monitor_height) = monitor.physical_size();
+        store.set_last(MarkedArea {
+            connector: monitor.connector.clone(),
+            x: 10,
+            y: 10,
+            width: 100,
+            height: 100,
+            monitor_width,
+            monitor_height,
+            scale: monitor.scale,
+        });
+        let shown = || window.imp().area_border.borrow().is_some();
+
+        settings.set_capture_mode(CaptureMode::MonitorWindow);
+        assert!(!shown());
+        settings.set_capture_mode(CaptureMode::Selection);
+        assert!(shown());
+        settings.set_show_area_border(false);
+        assert!(!shown());
+        settings.set_show_area_border(true);
+        assert!(shown());
+
+        settings.reset("capture-mode");
+        settings.reset("show-area-border");
+        assert!(!shown());
     }
 
     #[gtk::test]
@@ -1071,6 +1542,170 @@ mod tests {
             )
             .and_then(|value| value.get::<String>());
         assert_eq!(label.as_deref(), Some("_Requirements Report"));
+    }
+
+    #[gtk::test]
+    fn toasts_cover_the_whole_window() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+
+        let toast_overlay = window.imp().toast_overlay.get();
+        assert_eq!(window.content(), Some(toast_overlay.upcast()));
+        window.add_toast(adw::Toast::new("Hello"));
+    }
+
+    /// Polls `future` once.
+    async fn is_pending(mut future: Pin<&mut impl Future>) -> bool {
+        poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+    }
+
+    fn test_window() -> Window {
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+        let window = Window::new(&Application::new());
+
+        // Tests share the application, and so the store, of the thread.
+        let store = Application::get().area_store();
+        for saved in store.areas() {
+            store.remove(&saved.name);
+        }
+        window
+    }
+
+    fn area(x: i32) -> MarkedArea {
+        MarkedArea {
+            connector: "DP-3".into(),
+            x,
+            y: 80,
+            width: 1280,
+            height: 720,
+            monitor_width: 1680,
+            monitor_height: 1050,
+            scale: 1.05,
+        }
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn marking_disables_marking_and_recording_until_it_ends() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+
+        let (sender, receiver) = oneshot::channel::<Result<MarkedArea>>();
+        let receiver = RefCell::new(Some(receiver));
+        let initials = Rc::new(RefCell::new(Vec::new()));
+        window.set_marker(Rc::new(clone!(
+            #[strong]
+            initials,
+            move |initial| {
+                initials.borrow_mut().push(initial);
+                let receiver = receiver.borrow_mut().take().expect("marked once");
+                Box::pin(async move { receiver.await.unwrap() })
+            }
+        )));
+        let record_button = window.imp().start_record_button.get();
+        let mark_button = window.imp().mark_area_button.get();
+        assert!(record_button.is_sensitive() && mark_button.is_sensitive());
+        // A new area starts from the chosen one.
+        Application::get().area_store().set_last(area(100));
+
+        let mut marking = pin!(window.mark_area(MarkTarget::New));
+        assert!(is_pending(marking.as_mut()).await);
+        assert_eq!(*initials.borrow(), [Some(area(100))]);
+        assert!(!record_button.is_sensitive());
+        assert!(!mark_button.is_sensitive());
+
+        // A second marking while one is open ends at once.
+        assert_eq!(window.mark_area(MarkTarget::New).await, None);
+
+        sender
+            .send(Err(Cancelled::new("area marking").into()))
+            .unwrap();
+        assert_eq!(marking.await, None);
+        assert!(record_button.is_sensitive() && mark_button.is_sensitive());
+        assert_eq!(initials.borrow().len(), 1);
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn remarking_a_saved_area_keeps_its_name() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        store.save_named("Demo", area(100), false).unwrap();
+        store.select(None);
+
+        let initials = Rc::new(RefCell::new(Vec::new()));
+        window.set_marker(Rc::new(clone!(
+            #[strong]
+            initials,
+            move |initial| {
+                initials.borrow_mut().push(initial);
+                Box::pin(async { Ok(area(200)) })
+            }
+        )));
+
+        let marked = window.mark_area(MarkTarget::Replace("Demo".into())).await;
+
+        assert_eq!(marked, Some(area(200)));
+        assert_eq!(*initials.borrow(), [Some(area(100))]);
+        let saved = store.areas();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "Demo");
+        assert_eq!(saved[0].area, area(200));
+    }
+
+    #[gtk::test]
+    fn dropdown_follows_the_store() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        let dropdown = window.imp().area_dropdown.get();
+
+        store.save_named("Demo", area(100), false).unwrap();
+        store.set_last(area(200));
+
+        let model = dropdown
+            .model()
+            .and_downcast::<gtk::StringList>()
+            .expect("the dropdown lists strings");
+        assert_eq!(model.n_items(), 2);
+        assert!(model.string(0).unwrap().contains("Demo · 1280×720 on DP-3"));
+        assert!(
+            model
+                .string(1)
+                .unwrap()
+                .contains("Last area · 1280×720 on DP-3")
+        );
+        // `set_last` chose the last area.
+        assert_eq!(dropdown.selected(), 1);
+
+        dropdown.set_selected(0);
+        while glib::MainContext::default().iteration(false) {}
+        assert_eq!(store.selected(), Some(Selected::Named("Demo".into())));
+    }
+
+    #[gtk::test]
+    fn shortcuts_list_the_area_border_toggle() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        assert!(window.lookup_action("show-area-border").is_some());
+
+        let builder = gtk::Builder::from_resource("/io/github/seadve/Kooha/shortcuts-dialog.ui");
+        let lists_border = builder.objects().iter().any(|object| {
+            object.find_property("accelerator").is_some()
+                && object.property::<Option<String>>("accelerator").as_deref() == Some("<Control>b")
+        });
+        assert!(lists_border);
     }
 
     #[gtk::test]
