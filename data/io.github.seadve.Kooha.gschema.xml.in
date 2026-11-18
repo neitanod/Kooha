@@ -49,6 +49,21 @@
     <key type="s" name="camera-monitor">
       <default>""</default>
     </key>
+    <key type="b" name="camera-keep-framerate">
+      <default>true</default>
+    </key>
+    <key type="b" name="show-area-border">
+      <default>true</default>
+    </key>
+    <key type="s" name="video-encoder">
+      <choices>
+        <choice value="auto"/>
+        <choice value="intel"/>
+        <choice value="nvidia"/>
+        <choice value="cpu"/>
+      </choices>
+      <default>"auto"</default>
+    </key>
     <key type="u" name="record-delay">
       <default>0</default>
     </key>

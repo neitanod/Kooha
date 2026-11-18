@@ -26,7 +26,9 @@
 mod about;
 mod application;
 mod area_border;
+mod area_marker;
 mod area_selector;
+mod areas;
 mod camera_pip;
 mod cancelled;
 mod capture_warnings;
