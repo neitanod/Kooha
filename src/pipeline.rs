@@ -2,7 +2,14 @@ use anyhow::{Context, Ok, Result, bail, ensure};
 use gst::prelude::*;
 use gtk::graphene::Rect;
 
-use std::{os::unix::io::RawFd, path::PathBuf};
+use std::{
+    os::unix::io::RawFd,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::{
     area_selector::SelectAreaData,
@@ -25,6 +32,7 @@ pub struct PipelineBuilder {
     record_desktop_audio: bool,
     record_microphone: bool,
     select_area_data: Option<SelectAreaData>,
+    area_crop: Option<AreaCrop>,
     pause_gate: PauseGate,
     pause_flash: Option<FlashColor>,
 }
@@ -46,6 +54,7 @@ impl PipelineBuilder {
             record_desktop_audio: false,
             record_microphone: false,
             select_area_data: None,
+            area_crop: None,
             pause_gate: PauseGate::default(),
             pause_flash: None,
         }
@@ -66,6 +75,15 @@ impl PipelineBuilder {
         self
     }
 
+    /// Records only `area` of the stream. It takes precedence over
+    /// `select_area_data`.
+    // The recording starts calling it once marked areas are wired in.
+    #[allow(dead_code)]
+    pub fn area_crop(&mut self, area: AreaCrop) -> &mut Self {
+        self.area_crop = Some(area);
+        self
+    }
+
     pub fn pause_gate(&mut self, gate: PauseGate) -> &mut Self {
         self.pause_gate = gate;
         self
@@ -79,12 +97,16 @@ impl PipelineBuilder {
 
     /// Builds the pipeline.
     ///
-    ///                   (If has select_area_data)    (If pause_flash)
-    ///                        |             |                     |
-    ///                        v             v                     v
-    /// pipewiresrc-bin -> videoscale -> videocrop -> gate -> videobalance -> queue -> |
-    ///                                                                                | -> profile.attach -> filesink
-    ///                                                pulsesrc-bin -> gate -> queue -> |
+    /// With an area crop, `videocrop` cuts the area in stream pixels and
+    /// nothing is scaled. With `select_area_data` (the upstream selector),
+    /// `videocrop` cuts first and `videoscale` makes the result even.
+    ///
+    ///                  (If has area_crop or select_area_data)  (If pause_flash)
+    ///                        |             |                           |
+    ///                        v             v                           v
+    /// pipewiresrc-bin -> videocrop -> [videoscale -> caps] -> gate -> videobalance -> queue -> |
+    ///                                                                                         | -> profile.attach -> filesink
+    ///                                                         pulsesrc-bin -> gate -> queue -> |
     pub fn build(&self) -> Result<gst::Pipeline> {
         tracing::debug!(
             file_path = %self.file_path.display(),
@@ -96,6 +118,7 @@ impl PipelineBuilder {
             record_desktop_audio = ?self.record_desktop_audio,
             record_microphone = ?self.record_microphone,
             select_area_data = ?self.select_area_data,
+            area_crop = ?self.area_crop,
             pause_flash = ?self.pause_flash,
         );
 
@@ -113,16 +136,26 @@ impl PipelineBuilder {
             .build()?;
         pipeline.add_many([videosrc_bin.upcast_ref(), &filesink])?;
 
-        let video_out = if let Some(ref data) = self.select_area_data {
-            let videoscale = gst::ElementFactory::make("videoscale").build()?;
-            let videocrop = make_videocrop(data)?;
-            pipeline.add_many([&videoscale, &videocrop])?;
-
-            let videoscale_caps = videoscale_caps(data.stream_size);
-
-            videosrc_bin.link(&videoscale)?;
-            videoscale.link_filtered(&videocrop, &videoscale_caps)?;
+        let video_out = if let Some(area) = self.area_crop {
+            let videocrop = make_area_crop(area)?;
+            pipeline.add(&videocrop)?;
+            videosrc_bin.link(&videocrop)?;
             videocrop
+        } else if let Some(ref data) = self.select_area_data {
+            let crop = compute_crop(data);
+            let videocrop = make_videocrop(&crop)?;
+            let videoscale = gst::ElementFactory::make("videoscale").build()?;
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .property("caps", videoscale_caps(cropped_size(&crop)))
+                .build()?;
+            pipeline.add_many([&videocrop, &videoscale, &capsfilter])?;
+            gst::Element::link_many([
+                videosrc_bin.upcast_ref(),
+                &videocrop,
+                &videoscale,
+                &capsfilter,
+            ])?;
+            capsfilter
         } else {
             videosrc_bin.clone().upcast()
         };
@@ -208,6 +241,12 @@ pub fn link_gated_queue(
     let queue = gst::ElementFactory::make("queue")
         .name(queue_name)
         .build()?;
+    if branch == GatedBranch::Video {
+        // Room for a burst in the encoder without stalling the capture.
+        queue.set_property("max-size-buffers", 30_u32);
+        queue.set_property("max-size-time", 0_u64);
+        queue.set_property("max-size-bytes", 0_u32);
+    }
     pipeline.add_many([&identity, &queue])?;
     src.link(&identity)?;
 
@@ -317,31 +356,37 @@ pub fn compute_crop(data: &SelectAreaData) -> Crop {
     crop
 }
 
-/// The size `videoscale` gives the stream before the crop; x264enc requires
-/// even resolution.
+/// The stream size rounded down to even; x264enc requires even resolution.
 fn scaled_caps_size((width, height): (i32, i32)) -> (i32, i32) {
     (round_to_even(width), round_to_even(height))
 }
 
-/// The caps between `videoscale` and `videocrop`.
-fn videoscale_caps(stream_size: (i32, i32)) -> gst::Caps {
-    let (width, height) = scaled_caps_size(stream_size);
+/// The size the upstream selector records: the even frame minus the crop.
+fn cropped_size(crop: &Crop) -> (i32, i32) {
+    (
+        crop.frame.0 - crop.left - crop.right,
+        crop.frame.1 - crop.top - crop.bottom,
+    )
+}
+
+/// The caps after `videoscale`: `size` rounded down to even.
+fn videoscale_caps(size: (i32, i32)) -> gst::Caps {
+    let (width, height) = scaled_caps_size(size);
     gst::Caps::builder("video/x-raw")
         .field("width", width)
         .field("height", height)
         .build()
 }
 
-/// Create a videocrop element that computes the crop from the given coordinates
-/// and size.
-fn make_videocrop(data: &SelectAreaData) -> Result<gst::Element> {
+/// Creates a videocrop element that cuts the given crop.
+fn make_videocrop(crop: &Crop) -> Result<gst::Element> {
     let Crop {
         top,
         left,
         right,
         bottom,
         ..
-    } = compute_crop(data);
+    } = *crop;
 
     let crop = gst::ElementFactory::make("videocrop")
         .property("top", top)
@@ -352,17 +397,160 @@ fn make_videocrop(data: &SelectAreaData) -> Result<gst::Element> {
     Ok(crop)
 }
 
+/// What to cut from the whole-monitor stream, in stream (physical) pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AreaCrop {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// The physical size of the monitor the area was marked on.
+    pub expected_frame: (i32, i32),
+}
+
+/// How far, in pixels per axis, the real frame may be from the expected one
+/// before the area counts as marked on another monitor.
+const FRAME_TOLERANCE: i32 = 2;
+
+/// The sides `videocrop` cuts so that `area` comes out of a frame of the
+/// given size.
+///
+/// A frame up to `FRAME_TOLERANCE` pixels off the expected one is fine: an
+/// area that would go past its edge moves inwards and keeps its size. A
+/// frame further off, or smaller than the area, is an error, since the cut
+/// would land elsewhere than where the area was marked.
+fn area_crop_sides(area: &AreaCrop, frame: (i32, i32)) -> Result<Crop> {
+    let (frame_w, frame_h) = frame;
+    let (expected_w, expected_h) = area.expected_frame;
+
+    if (frame_w - expected_w).abs() > FRAME_TOLERANCE
+        || (frame_h - expected_h).abs() > FRAME_TOLERANCE
+    {
+        bail!(
+            "The stream is {frame_w}x{frame_h}, but the area was marked on a \
+             {expected_w}x{expected_h} monitor"
+        );
+    }
+    if area.width > frame_w || area.height > frame_h {
+        bail!(
+            "The {}x{} area does not fit in the {frame_w}x{frame_h} stream",
+            area.width,
+            area.height
+        );
+    }
+
+    let left = area.x.clamp(0, frame_w - area.width);
+    let top = area.y.clamp(0, frame_h - area.height);
+    if (left, top) != (area.x, area.y) {
+        tracing::warn!(?area, ?frame, left, top, "Moved the area inside the stream");
+    }
+
+    Ok(Crop {
+        top,
+        left,
+        right: frame_w - left - area.width,
+        bottom: frame_h - top - area.height,
+        frame,
+    })
+}
+
+/// The width and height fields of video caps.
+fn caps_size(caps: &gst::CapsRef) -> Option<(i32, i32)> {
+    let structure = caps.structure(0)?;
+    Some((
+        structure.get::<i32>("width").ok()?,
+        structure.get::<i32>("height").ok()?,
+    ))
+}
+
+/// Creates a videocrop element that cuts `area`. The sides are set when the
+/// caps arrive, from the real frame size; a frame that does not match the
+/// area posts an error on the bus.
+fn make_area_crop(area: AreaCrop) -> Result<gst::Element> {
+    let videocrop = gst::ElementFactory::make("videocrop")
+        .name("kooha-area-crop")
+        .property("left", area.x)
+        .property("top", area.y)
+        .build()?;
+
+    let weak = videocrop.downgrade();
+    videocrop
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            let Some(gst::EventView::Caps(event)) = info.event().map(|event| event.view()) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let (Some(videocrop), Some(frame)) = (weak.upgrade(), caps_size(event.caps())) else {
+                return gst::PadProbeReturn::Ok;
+            };
+
+            area_crop_sides(&area, frame).map_or_else(
+                |error| {
+                    gst::element_error!(videocrop, gst::StreamError::Format, ("{}", error));
+                    gst::PadProbeReturn::Drop
+                },
+                |crop| {
+                    tracing::debug!(?area, ?crop, "Cropping the area");
+                    videocrop.set_property("left", crop.left);
+                    videocrop.set_property("top", crop.top);
+                    videocrop.set_property("right", crop.right);
+                    videocrop.set_property("bottom", crop.bottom);
+                    gst::PadProbeReturn::Ok
+                },
+            )
+        })
+        .expect("probes can be added to any pad");
+
+    Ok(videocrop)
+}
+
+/// Counts the frames the capture queue drops, and logs the total when the
+/// queue goes away.
+#[derive(Debug, Default)]
+struct DroppedFrames(Arc<AtomicU64>);
+
+impl Drop for DroppedFrames {
+    fn drop(&mut self) {
+        let dropped = self.0.load(Ordering::Relaxed);
+        tracing::info!(dropped, "Capture queue dropped frames");
+    }
+}
+
+/// Creates the queue between the capture and `videorate`. It holds three
+/// frames and, when full, drops the oldest instead of stalling `pipewiresrc`;
+/// `videorate` then fills the gap. Also returns the count of dropped frames.
+fn make_capture_queue() -> Result<(gst::Element, Arc<AtomicU64>)> {
+    let queue = gst::ElementFactory::make("queue")
+        .name("kooha-capture-queue")
+        .property("max-size-buffers", 3_u32)
+        .property("max-size-time", 0_u64)
+        .property("max-size-bytes", 0_u32)
+        .property_from_str("leaky", "downstream")
+        .build()?;
+
+    // A full leaky queue emits `overrun` and then drops one buffer.
+    let dropped = DroppedFrames::default();
+    let count = Arc::clone(&dropped.0);
+    queue.connect("overrun", false, move |_| {
+        dropped.0.fetch_add(1, Ordering::Relaxed);
+        None
+    });
+
+    Ok((queue, count))
+}
+
 /// Creates a bin with a src pad for multiple pipewire streams.
 ///
 /// Single stream:
 ///
-/// pipewiresrc -> videoflip -> videorate
+/// pipewiresrc -> videoflip -> capture queue -> videorate
 ///
 /// Multiple streams:
 ///
 /// pipewiresrc1 -> videoflip -> |
 ///                              |
-/// pipewiresrc2 -> videoflip -> | -> compositor -> videorate
+/// pipewiresrc2 -> videoflip -> | -> compositor -> capture queue -> videorate
 ///                              |
 /// pipewiresrcn -> videoflip -> |
 pub fn make_videosrc_bin(
@@ -385,8 +573,9 @@ pub fn make_videosrc_bin(
                 .build(),
         )
         .build()?;
-    bin.add_many([&videorate, &videorate_capsfilter])?;
-    videorate.link(&videorate_capsfilter)?;
+    let (capture_queue, _) = make_capture_queue()?;
+    bin.add_many([&capture_queue, &videorate, &videorate_capsfilter])?;
+    gst::Element::link_many([&capture_queue, &videorate, &videorate_capsfilter])?;
 
     match streams {
         [] => bail!("No streams provided"),
@@ -394,12 +583,12 @@ pub fn make_videosrc_bin(
             let pipewiresrc = make_pipewiresrc(fd, &stream.node_id().to_string())?;
             let videoflip = make_videoflip()?;
             bin.add_many([&pipewiresrc, &videoflip])?;
-            gst::Element::link_many([&pipewiresrc, &videoflip, &videorate])?;
+            gst::Element::link_many([&pipewiresrc, &videoflip, &capture_queue])?;
         }
         streams => {
             let compositor = gst::ElementFactory::make("compositor").build()?;
             bin.add(&compositor)?;
-            compositor.link(&videorate)?;
+            compositor.link(&capture_queue)?;
 
             let mut last_pos = 0;
             for stream in streams {
@@ -533,7 +722,11 @@ fn round_to_even_f32(number: f32) -> i32 {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::area_selector::Selection;
+    use crate::{area_selector::Selection, settings::test_utils::init_resources};
+
+    use gtk::glib::{self, variant::StaticVariantType};
+    // The module imports anyhow's `Ok`; these tests build std results.
+    use std::result::Result::Ok;
 
     macro_rules! assert_even {
         ($number:expr) => {
@@ -679,5 +872,332 @@ mod test {
             downstream_names(&src),
             ["kooha-audio-gate", "kooha-audioenc-queue"]
         );
+    }
+
+    fn factory_name(element: &gst::Element) -> String {
+        element
+            .factory()
+            .map(|factory| factory.name().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Factory names of the elements downstream of `element`.
+    fn downstream_factories(element: &gst::Element) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut current = element.clone();
+        while let Some(next) = current
+            .static_pad("src")
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+        {
+            names.push(factory_name(&next));
+            current = next;
+        }
+        names
+    }
+
+    /// A whole recording pipeline for one 1920x1080 stream, not started.
+    fn built_pipeline(configure: impl FnOnce(&mut PipelineBuilder)) -> gst::Pipeline {
+        gst::init().unwrap();
+        init_resources();
+
+        let stream = glib::Variant::parse(
+            Some(&Stream::static_variant_type()),
+            "(uint32 63, {'size': <(1920, 1080)>})",
+        )
+        .unwrap()
+        .get::<Stream>()
+        .unwrap();
+        let mut builder = PipelineBuilder::new(
+            PathBuf::from("/tmp/kooha-pipeline-test-unused.mp4"),
+            gst::Fraction::new(30, 1),
+            Profile::from_id("mp4").unwrap().clone(),
+            -1,
+            vec![stream],
+        );
+        configure(&mut builder);
+        builder.build().unwrap()
+    }
+
+    fn videosrc_bin(pipeline: &gst::Pipeline) -> gst::Element {
+        pipeline.by_name("kooha-pipewiresrc-bin").unwrap()
+    }
+
+    const AREA: AreaCrop = AreaCrop {
+        x: 100,
+        y: 80,
+        width: 1280,
+        height: 720,
+        expected_frame: (1680, 1050),
+    };
+
+    #[test]
+    fn area_crop_needs_no_videoscale() {
+        let pipeline = built_pipeline(|builder| {
+            builder.area_crop(AREA);
+        });
+
+        let factories = pipeline
+            .iterate_recurse()
+            .into_iter()
+            .map(|element| factory_name(&element.unwrap()))
+            .collect::<Vec<_>>();
+        assert!(!factories.iter().any(|name| name == "videoscale"));
+
+        let downstream = downstream_factories(&videosrc_bin(&pipeline));
+        assert_eq!(downstream[..2], ["videocrop", "identity"]);
+    }
+
+    #[test]
+    fn selector_path_crops_before_scaling() {
+        let pipeline = built_pipeline(|builder| {
+            builder.select_area_data(select_area_data((1920, 1080)));
+        });
+
+        let downstream = downstream_factories(&videosrc_bin(&pipeline));
+        assert_eq!(
+            downstream[..4],
+            ["videocrop", "videoscale", "capsfilter", "identity"]
+        );
+    }
+
+    #[test]
+    fn selector_path_scales_the_cropped_size_to_even() {
+        // Stream 1921x1081 cropped by (top 100, left 200, right 920, bottom
+        // 380) leaves 801x601, which `videoscale` makes 800x600.
+        let pipeline = built_pipeline(|builder| {
+            builder.select_area_data(select_area_data((1921, 1081)));
+        });
+
+        let capsfilter = videosrc_bin(&pipeline)
+            .static_pad("src")
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .and_then(|videocrop| videocrop.static_pad("src"))
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .and_then(|videoscale| videoscale.static_pad("src"))
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .unwrap();
+        let caps = capsfilter.property::<gst::Caps>("caps");
+        let structure = caps.structure(0).unwrap();
+        assert_eq!(
+            (
+                structure.get::<i32>("width").unwrap(),
+                structure.get::<i32>("height").unwrap()
+            ),
+            (800, 600)
+        );
+    }
+
+    /// Runs one `frame`-sized test buffer through the area crop. Returns the
+    /// crop element and the caps that came out, or the bus error.
+    fn run_area_crop(
+        frame: (i32, i32),
+        area: AreaCrop,
+    ) -> (gst::Element, std::result::Result<(i32, i32), String>) {
+        gst::init().unwrap();
+
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", 1)
+            .build()
+            .unwrap();
+        let videocrop = make_area_crop(area).unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        pipeline.add_many([&src, &videocrop, &sink]).unwrap();
+        src.link_filtered(
+            &videocrop,
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "BGRx")
+                .field("width", frame.0)
+                .field("height", frame.1)
+                .build(),
+        )
+        .unwrap();
+        videocrop.link(&sink).unwrap();
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let message = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the pipeline ends within 5 s");
+        let result = match message.view() {
+            gst::MessageView::Error(error) => Err(error.error().to_string()),
+            _ => {
+                let caps = sink.static_pad("sink").unwrap().current_caps().unwrap();
+                let structure = caps.structure(0).unwrap();
+                Ok((
+                    structure.get::<i32>("width").unwrap(),
+                    structure.get::<i32>("height").unwrap(),
+                ))
+            }
+        };
+        pipeline.set_state(gst::State::Null).unwrap();
+        (videocrop, result)
+    }
+
+    fn sides(videocrop: &gst::Element) -> [i32; 4] {
+        ["left", "top", "right", "bottom"].map(|side| videocrop.property::<i32>(side))
+    }
+
+    #[test]
+    fn area_crop_sets_right_and_bottom_from_caps() {
+        let (videocrop, result) = run_area_crop((1680, 1050), AREA);
+
+        assert_eq!(result, Ok((1280, 720)));
+        assert_eq!(sides(&videocrop), [100, 80, 300, 250]);
+    }
+
+    /// An area against the bottom right corner of a 1680x1050 monitor.
+    const CORNER: AreaCrop = AreaCrop {
+        x: 400,
+        y: 330,
+        width: 1280,
+        height: 720,
+        expected_frame: (1680, 1050),
+    };
+
+    #[test]
+    fn area_crop_shifts_inside_a_frame_one_pixel_smaller() {
+        let (videocrop, result) = run_area_crop((1679, 1049), CORNER);
+
+        assert_eq!(result, Ok((1280, 720)));
+        assert_eq!(sides(&videocrop), [399, 329, 0, 0]);
+    }
+
+    #[test]
+    fn area_crop_shifts_inside_a_frame_two_pixels_smaller() {
+        let (videocrop, result) = run_area_crop((1678, 1048), CORNER);
+
+        assert_eq!(result, Ok((1280, 720)));
+        assert_eq!(sides(&videocrop), [398, 328, 0, 0]);
+    }
+
+    #[test]
+    fn area_crop_fails_on_a_frame_of_another_size() {
+        let (_, result) = run_area_crop((1677, 1050), CORNER);
+
+        let error = result.unwrap_err();
+        assert!(error.contains("1677x1050"), "{error}");
+    }
+
+    #[test]
+    fn area_crop_fails_when_the_area_is_larger_than_the_frame() {
+        let area = AreaCrop {
+            x: 0,
+            y: 0,
+            width: 1680,
+            height: 720,
+            expected_frame: (1680, 1050),
+        };
+        let (_, result) = run_area_crop((1679, 1050), area);
+
+        let error = result.unwrap_err();
+        assert!(error.contains("1680x720"), "{error}");
+    }
+
+    #[test]
+    fn area_crop_sides_within_the_frame_are_kept() {
+        assert_eq!(
+            area_crop_sides(&AREA, (1681, 1052)).unwrap(),
+            Crop {
+                top: 80,
+                left: 100,
+                right: 301,
+                bottom: 252,
+                frame: (1681, 1052),
+            }
+        );
+    }
+
+    fn queue_limits(queue: &gst::Element) -> (u32, u64, u32) {
+        (
+            queue.property::<u32>("max-size-buffers"),
+            queue.property::<u64>("max-size-time"),
+            queue.property::<u32>("max-size-bytes"),
+        )
+    }
+
+    fn leaky_nick(queue: &gst::Element) -> String {
+        let value = queue.property_value("leaky");
+        glib::EnumValue::from_value(&value)
+            .map(|(_, leaky)| leaky.nick().to_string())
+            .unwrap()
+    }
+
+    fn peer_factory(element: &gst::Element, pad_name: &str) -> String {
+        let peer = element
+            .static_pad(pad_name)
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .unwrap();
+        factory_name(&peer)
+    }
+
+    #[test]
+    fn capture_queue_sits_between_videoflip_and_videorate() {
+        let pipeline = built_pipeline(|_| {});
+
+        let queue = pipeline.by_name("kooha-capture-queue").unwrap();
+        assert_eq!(queue_limits(&queue), (3, 0, 0));
+        assert_eq!(leaky_nick(&queue), "downstream");
+        assert_eq!(peer_factory(&queue, "sink"), "videoflip");
+        assert_eq!(peer_factory(&queue, "src"), "videorate");
+    }
+
+    #[test]
+    fn videoenc_queue_holds_thirty_buffers() {
+        let pipeline = built_pipeline(|_| {});
+
+        let queue = pipeline.by_name("kooha-videoenc-queue").unwrap();
+        assert_eq!(queue_limits(&queue), (30, 0, 0));
+        assert_eq!(leaky_nick(&queue), "no");
+    }
+
+    #[test]
+    fn capture_queue_counts_dropped_frames() {
+        gst::init().unwrap();
+
+        let (queue, dropped) = make_capture_queue().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        let pipeline = gst::Pipeline::new();
+        pipeline.add_many([&queue, &sink]).unwrap();
+        queue.link(&sink).unwrap();
+        pipeline.set_state(gst::State::Paused).unwrap();
+
+        let src = gst::Pad::builder(gst::PadDirection::Src).build();
+        src.set_active(true).unwrap();
+        src.link(&queue.static_pad("sink").unwrap()).unwrap();
+        src.push_event(gst::event::StreamStart::new("capture-queue-test"));
+        src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(
+            "video/x-raw",
+        )));
+        src.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+            gst::ClockTime,
+        >::new()));
+
+        // The first buffer reaches the sink, which holds it while paused, so
+        // the queue's thread stays blocked from then on.
+        src.push(gst::Buffer::new()).unwrap();
+        let start = std::time::Instant::now();
+        while queue.property::<u32>("current-level-buffers") > 0 {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+
+        // Three fill the queue; each of the other seven drops the oldest.
+        for _ in 0..10 {
+            src.push(gst::Buffer::new()).unwrap();
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 7);
+        assert_eq!(queue.property::<u32>("current-level-buffers"), 3);
+
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 }
