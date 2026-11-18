@@ -4,7 +4,7 @@ use std::{
     ffi::OsStr,
     fmt,
     future::Future,
-    os::fd::{IntoRawFd, OwnedFd},
+    os::fd::{AsRawFd, IntoRawFd, OwnedFd},
     path::{Path, PathBuf},
     pin::Pin,
     rc::Rc,
@@ -606,7 +606,9 @@ impl Recording {
             new_recording_path(&config.saving_location, config.profile.file_extension());
         imp.file.set(gio::File::for_path(&file_path)).unwrap();
 
-        let raw_fd = fd.into_raw_fd();
+        // `fd` stays owned until the pipeline exists, so that an error before
+        // closes it; `pipewiresrc` only borrows the number.
+        let raw_fd = fd.as_raw_fd();
 
         let mut pipeline_builder = PipelineBuilder::new(
             file_path,
@@ -664,6 +666,8 @@ impl Recording {
             )
         })?;
         imp.pipeline.set(pipeline.clone()).unwrap();
+        // From here on, the pipeline uses it for the rest of the recording.
+        let _ = fd.into_raw_fd();
 
         // After the portal and the area selector, before the countdown.
         let before_capture = imp.before_capture.borrow().0.as_ref().map(|f| f());
