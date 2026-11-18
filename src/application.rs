@@ -17,7 +17,10 @@ use crate::{
     format, overlay,
     preferences_dialog::PreferencesDialog,
     settings::Settings,
-    tray::{TrayCommand, TrayModel, TrayRequest, TrayService, model::tray_state},
+    tray::{
+        TrayCommand, TrayModel, TrayRequest, TrayService,
+        model::{TrayRecordingState, tray_state},
+    },
     window::{RecordingSnapshot, Window},
 };
 
@@ -150,6 +153,7 @@ impl Application {
         }
 
         let window = AreasWindow::new(&self.area_store(), &self.window());
+        window.set_recording(is_recording(imp.tray_snapshot.get()));
         imp.areas_window.set(Some(&window));
         window
     }
@@ -229,6 +233,10 @@ impl Application {
         let imp = self.imp();
 
         imp.tray_snapshot.set(snapshot);
+
+        if let Some(window) = imp.areas_window.upgrade() {
+            window.set_recording(is_recording(snapshot));
+        }
 
         if let Some(tray) = imp.tray.get() {
             tray.update(tray_model(snapshot, self.settings()));
@@ -477,6 +485,12 @@ fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayM
     }
 }
 
+/// Whether the window's recording `snapshot` is past idle: from the portal
+/// and the countdown until it is saved.
+fn is_recording(snapshot: Option<RecordingSnapshot>) -> bool {
+    tray_state(snapshot.map(|(state, _, _)| state)) != TrayRecordingState::Idle
+}
+
 /// Applies a capture toggle from the tray to `settings`, which the window's
 /// actions share. Returns whether it changed anything.
 ///
@@ -602,6 +616,33 @@ mod tests {
                 .transient_for()
                 .is_some_and(|parent| parent.is::<Window>())
         );
+    }
+
+    #[gtk::test]
+    fn areas_window_follows_the_recording() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let recording = Some((
+            RecordingState::Recording,
+            gst::ClockTime::ZERO,
+            CaptureWarnings::default(),
+        ));
+
+        // A recording that began before the window opened.
+        app.update_tray(recording);
+        let window = app.areas_window();
+        assert!(window.is_recording());
+
+        app.update_tray(None);
+        assert!(!window.is_recording());
+
+        app.update_tray(recording);
+        assert!(window.is_recording());
+        app.update_tray(None);
     }
 
     #[test]

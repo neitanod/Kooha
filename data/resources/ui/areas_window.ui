@@ -23,7 +23,7 @@
                     <property name="title" translatable="yes">No Saved Areas</property>
                     <property name="description" translatable="yes">Mark an area and save it with a name to see it here.</property>
                     <property name="child">
-                      <object class="GtkButton">
+                      <object class="GtkButton" id="mark_button">
                         <property name="name">mark-area</property>
                         <property name="label" translatable="yes">Mark Area</property>
                         <property name="halign">center</property>

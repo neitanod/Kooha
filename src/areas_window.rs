@@ -103,7 +103,7 @@ pub fn rename(store: &AreaStore, from: &str, to: &str) -> RenameOutcome {
 }
 
 mod imp {
-    use std::cell::{OnceCell, RefCell};
+    use std::cell::{Cell, OnceCell, RefCell};
 
     use super::*;
 
@@ -113,12 +113,16 @@ mod imp {
         #[template_child]
         pub(super) stack: TemplateChild<gtk::Stack>,
         #[template_child]
+        pub(super) mark_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub(super) list_box: TemplateChild<gtk::ListBox>,
         #[template_child]
         pub(super) footer_label: TemplateChild<gtk::Label>,
 
         pub(super) store: OnceCell<AreaStore>,
         pub(super) store_handler: RefCell<Option<glib::SignalHandlerId>>,
+        /// The main window ignores marking and choosing while recording.
+        pub(super) recording: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -193,6 +197,21 @@ impl AreasWindow {
         obj
     }
 
+    /// Disables choosing and marking while a recording goes on.
+    pub fn set_recording(&self, recording: bool) {
+        let imp = self.imp();
+        if imp.recording.replace(recording) == recording {
+            return;
+        }
+
+        imp.mark_button.set_sensitive(!recording);
+        self.rebuild();
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.imp().recording.get()
+    }
+
     fn store(&self) -> &AreaStore {
         self.imp().store.get().unwrap()
     }
@@ -253,7 +272,7 @@ impl AreasWindow {
         let choose = gtk::Button::builder()
             .name("choose")
             .label(gettext("Choose"))
-            .sensitive(model.can_choose)
+            .sensitive(model.can_choose && !self.is_recording())
             .valign(gtk::Align::Center)
             .build();
         choose.connect_clicked(clone!(
@@ -278,7 +297,7 @@ impl AreasWindow {
         row.add_suffix(&rename);
 
         let mark_again = icon_button("mark-again", "selection-symbolic", &gettext("Mark Again"));
-        mark_again.set_sensitive(model.can_mark_again);
+        mark_again.set_sensitive(model.can_mark_again && !self.is_recording());
         mark_again.connect_clicked(clone!(
             #[weak(rename_to = obj)]
             self,
@@ -661,6 +680,44 @@ mod tests {
             store.selected(),
             Some(crate::areas::Selected::Named("Demo".into()))
         );
+    }
+
+    /// While recording, the window's marking and choosing do nothing: the
+    /// main window ignores its actions then.
+    #[gtk::test]
+    fn recording_disables_choosing_and_marking() {
+        crate::settings::test_utils::init_resources();
+        let store = store_with(&["Demo", "Talk"]); // Talk is chosen
+        let (window, _log) = areas_window(&store);
+        let sensitive = |name: &str| {
+            find_button(window.row(0).unwrap().upcast_ref(), name)
+                .unwrap()
+                .is_sensitive()
+        };
+        let mark_area = || {
+            find_button(window.upcast_ref(), "mark-area")
+                .unwrap()
+                .is_sensitive()
+        };
+
+        window.set_recording(true);
+        assert!(!sensitive("choose"));
+        assert!(!sensitive("mark-again"));
+        assert!(sensitive("rename"));
+        assert!(sensitive("delete"));
+        assert!(!mark_area());
+
+        // Also after the list changes.
+        store
+            .save_named("Other", saved("Other").area, false)
+            .unwrap();
+        store.select(Some(crate::areas::Selected::Named("Talk".into())));
+        assert!(!sensitive("choose"));
+
+        window.set_recording(false);
+        assert!(sensitive("choose"));
+        assert!(sensitive("mark-again"));
+        assert!(mark_area());
     }
 
     #[gtk::test]
