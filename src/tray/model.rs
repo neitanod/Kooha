@@ -1,6 +1,11 @@
 use gettextrs::gettext;
 
-use crate::{config::APP_ID, i18n::gettext_f, recording::RecordingState};
+use crate::{
+    areas::{MarkedArea, MonitorInfo, SavedArea, Selected},
+    config::APP_ID,
+    i18n::gettext_f,
+    recording::RecordingState,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// `Starting` covers a recording that exists but has not begun yet: the portal
@@ -31,9 +36,24 @@ pub struct TrayModel {
     pub camera_enabled: bool,
     /// Whether overlays are available to show the camera.
     pub camera_available: bool,
+    /// Whether areas can be marked and shown: they need overlays too.
+    pub areas_available: bool,
+    /// The saved areas, then the last one.
+    pub areas: Vec<TrayArea>,
+    pub show_area_border: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One area in the Area submenu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayArea {
+    pub label: String,
+    pub selected: Selected,
+    /// False when the area is out of date.
+    pub enabled: bool,
+    pub chosen: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     ToggleRecord,
     TogglePause,
@@ -41,6 +61,9 @@ pub enum TrayCommand {
     ToggleMicrophone,
     TogglePointer,
     ToggleCamera,
+    SelectArea(Selected),
+    MarkArea,
+    ToggleAreaBorder,
     ShowWindow,
     Quit,
 }
@@ -60,7 +83,56 @@ pub enum TrayEntry {
         command: TrayCommand,
         enabled: bool,
     },
+    SubMenu {
+        label: String,
+        children: Vec<TrayEntry>,
+    },
+    /// The radios of one submenu form one group.
+    Radio {
+        label: String,
+        command: TrayCommand,
+        enabled: bool,
+        selected: bool,
+    },
     Separator,
+}
+
+/// The Area submenu items: `areas`, then the `last` one, with the
+/// `selected` one chosen and the ones out of date for `monitors` disabled.
+pub fn tray_areas(
+    areas: &[SavedArea],
+    last: Option<&MarkedArea>,
+    selected: Option<&Selected>,
+    monitors: &[MonitorInfo],
+) -> Vec<TrayArea> {
+    let item = |name: String, area: &MarkedArea, which: Selected| {
+        let staleness = area.staleness(monitors);
+        let description = staleness.as_ref().map_or_else(
+            || area.describe(),
+            |staleness| staleness.describe(&area.connector),
+        );
+        TrayArea {
+            label: gettext_f(
+                "{name} · {area}",
+                &[("name", &name), ("area", &description)],
+            ),
+            enabled: staleness.is_none(),
+            chosen: selected == Some(&which),
+            selected: which,
+        }
+    };
+
+    areas
+        .iter()
+        .map(|saved| {
+            item(
+                saved.name.clone(),
+                &saved.area,
+                Selected::Named(saved.name.clone()),
+            )
+        })
+        .chain(last.map(|area| item(gettext("Last area"), area, Selected::Last)))
+        .collect()
 }
 
 /// The tray state for the window's recording, `None` when there is none.
@@ -135,6 +207,16 @@ pub fn menu_entries(model: &TrayModel) -> Vec<TrayEntry> {
         command: TrayCommand::ToggleCamera,
         enabled: model.camera_available,
     });
+    if model.areas_available {
+        entries.push(area_submenu(model, is_idle));
+        // The border can be hidden at any time, also while recording.
+        entries.push(TrayEntry::Check {
+            label: gettext("Show Area Border"),
+            checked: model.show_area_border,
+            command: TrayCommand::ToggleAreaBorder,
+            enabled: true,
+        });
+    }
     entries.push(TrayEntry::Separator);
 
     entries.push(TrayEntry::Button {
@@ -149,6 +231,34 @@ pub fn menu_entries(model: &TrayModel) -> Vec<TrayEntry> {
     });
 
     entries
+}
+
+/// The Area submenu. Like the capture toggles, it is disabled while
+/// recording: a recording reads the area once, when it begins.
+fn area_submenu(model: &TrayModel, is_idle: bool) -> TrayEntry {
+    let mut children = model
+        .areas
+        .iter()
+        .map(|area| TrayEntry::Radio {
+            label: area.label.clone(),
+            command: TrayCommand::SelectArea(area.selected.clone()),
+            enabled: is_idle && area.enabled,
+            selected: area.chosen,
+        })
+        .collect::<Vec<_>>();
+    if !children.is_empty() {
+        children.push(TrayEntry::Separator);
+    }
+    children.push(TrayEntry::Button {
+        label: gettext("Mark New Area…"),
+        command: TrayCommand::MarkArea,
+        enabled: is_idle,
+    });
+
+    TrayEntry::SubMenu {
+        label: gettext("Area"),
+        children,
+    }
 }
 
 pub fn icon_name(state: TrayRecordingState) -> &'static str {
@@ -197,6 +307,9 @@ mod tests {
             audio_supported: true,
             camera_enabled: false,
             camera_available: true,
+            areas_available: false,
+            areas: Vec::new(),
+            show_area_border: true,
         }
     }
 
@@ -209,7 +322,7 @@ mod tests {
                     checked,
                     enabled,
                     ..
-                } => Some((*command, *checked, *enabled)),
+                } => Some((command.clone(), *checked, *enabled)),
                 _ => None,
             })
             .collect()
@@ -497,5 +610,214 @@ mod tests {
 
         model.camera_available = false;
         assert!(checks(&menu_entries(&model)).contains(&(TrayCommand::ToggleCamera, true, false)));
+    }
+
+    fn dp3() -> MonitorInfo {
+        MonitorInfo {
+            connector: "DP-3".into(),
+            logical: (1920, 454, 1600, 1000),
+            scale: 1.05,
+        }
+    }
+
+    fn area_on_dp3(x: i32) -> MarkedArea {
+        MarkedArea {
+            connector: "DP-3".into(),
+            x,
+            y: 80,
+            width: 1280,
+            height: 720,
+            monitor_width: 1680,
+            monitor_height: 1050,
+            scale: 1.05,
+        }
+    }
+
+    fn saved(name: &str) -> SavedArea {
+        SavedArea {
+            name: name.into(),
+            area: area_on_dp3(100),
+        }
+    }
+
+    fn named(name: &str) -> Selected {
+        Selected::Named(name.into())
+    }
+
+    #[test]
+    fn tray_areas_list_saved_then_last() {
+        let areas = tray_areas(
+            &[saved("Demo"), saved("Talk")],
+            Some(&area_on_dp3(0)),
+            Some(&named("Talk")),
+            &[dp3()],
+        );
+
+        assert_eq!(
+            areas,
+            [
+                TrayArea {
+                    label: "Demo · 1280×720 on DP-3".into(),
+                    selected: named("Demo"),
+                    enabled: true,
+                    chosen: false,
+                },
+                TrayArea {
+                    label: "Talk · 1280×720 on DP-3".into(),
+                    selected: named("Talk"),
+                    enabled: true,
+                    chosen: true,
+                },
+                TrayArea {
+                    label: "Last area · 1280×720 on DP-3".into(),
+                    selected: Selected::Last,
+                    enabled: true,
+                    chosen: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tray_areas_last_chosen_and_no_last() {
+        let last_chosen = tray_areas(&[], Some(&area_on_dp3(0)), Some(&Selected::Last), &[dp3()]);
+        assert!(last_chosen[0].chosen);
+
+        let none = tray_areas(&[saved("Demo")], None, None, &[dp3()]);
+        assert_eq!(none.len(), 1);
+        assert!(!none[0].chosen);
+    }
+
+    /// When its monitor goes, an area turns disabled and says why.
+    #[test]
+    fn tray_area_turns_stale() {
+        let fresh = tray_areas(&[saved("Demo")], None, Some(&named("Demo")), &[dp3()]);
+        assert!(fresh[0].enabled);
+
+        let stale = tray_areas(&[saved("Demo")], None, Some(&named("Demo")), &[]);
+        assert_eq!(
+            stale[0],
+            TrayArea {
+                label: "Demo · DP-3 is not connected".into(),
+                selected: named("Demo"),
+                enabled: false,
+                chosen: true,
+            }
+        );
+    }
+
+    fn with_areas(state: TrayRecordingState) -> TrayModel {
+        let mut model = model(state);
+        model.areas_available = true;
+        model.areas = tray_areas(
+            &[saved("Demo"), saved("Old")],
+            None,
+            Some(&named("Demo")),
+            &[dp3()],
+        );
+        model.areas[1].enabled = false; // as if stale
+        model
+    }
+
+    fn area_submenu(entries: &[TrayEntry]) -> Option<&Vec<TrayEntry>> {
+        entries.iter().find_map(|entry| match entry {
+            TrayEntry::SubMenu { label, children } if label == "Area" => Some(children),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn area_submenu_and_border_check() {
+        let entries = menu_entries(&with_areas(TrayRecordingState::Idle));
+
+        assert_eq!(
+            area_submenu(&entries).expect("menu has the Area submenu"),
+            &vec![
+                TrayEntry::Radio {
+                    label: "Demo · 1280×720 on DP-3".into(),
+                    command: TrayCommand::SelectArea(named("Demo")),
+                    enabled: true,
+                    selected: true,
+                },
+                TrayEntry::Radio {
+                    label: "Old · 1280×720 on DP-3".into(),
+                    command: TrayCommand::SelectArea(named("Old")),
+                    enabled: false,
+                    selected: false,
+                },
+                TrayEntry::Separator,
+                button("Mark New Area…", TrayCommand::MarkArea),
+            ]
+        );
+        assert!(checks(&entries).contains(&(TrayCommand::ToggleAreaBorder, true, true)));
+
+        // After the capture toggles, before the window entries.
+        let camera = position(&entries, |entry| {
+            matches!(
+                entry,
+                TrayEntry::Check {
+                    command: TrayCommand::ToggleCamera,
+                    ..
+                }
+            )
+        });
+        let submenu = position(&entries, |entry| matches!(entry, TrayEntry::SubMenu { .. }));
+        let show_window = position(&entries, |entry| {
+            matches!(
+                entry,
+                TrayEntry::Button {
+                    command: TrayCommand::ShowWindow,
+                    ..
+                }
+            )
+        });
+        assert!(camera < submenu && submenu < show_window);
+    }
+
+    #[test]
+    fn area_submenu_without_areas_only_marks() {
+        let mut model = model(TrayRecordingState::Idle);
+        model.areas_available = true;
+
+        assert_eq!(
+            area_submenu(&menu_entries(&model)).unwrap(),
+            &vec![button("Mark New Area…", TrayCommand::MarkArea)]
+        );
+    }
+
+    /// A recording reads the area once, when it begins.
+    #[test]
+    fn recording_disables_choosing_and_marking_areas() {
+        let mut model = with_areas(TrayRecordingState::Recording);
+        model.show_area_border = false;
+        let entries = menu_entries(&model);
+
+        let enabled = area_submenu(&entries)
+            .unwrap()
+            .iter()
+            .filter_map(|entry| match entry {
+                TrayEntry::Radio { enabled, .. } | TrayEntry::Button { enabled, .. } => {
+                    Some(*enabled)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(enabled, [false, false, false]);
+        // The border can be hidden at any time.
+        assert!(checks(&entries).contains(&(TrayCommand::ToggleAreaBorder, false, true)));
+    }
+
+    #[test]
+    fn no_area_entries_without_overlays() {
+        let mut model = with_areas(TrayRecordingState::Idle);
+        model.areas_available = false;
+        let entries = menu_entries(&model);
+
+        assert!(area_submenu(&entries).is_none());
+        assert!(
+            checks(&entries)
+                .iter()
+                .all(|(command, _, _)| *command != TrayCommand::ToggleAreaBorder)
+        );
     }
 }
