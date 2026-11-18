@@ -79,6 +79,52 @@
                           </object>
                         </child>
                         <child>
+                          <object class="GtkBox" id="area_row">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">6</property>
+                            <child>
+                              <object class="GtkBox">
+                                <property name="spacing">6</property>
+                                <child>
+                                  <object class="GtkDropDown" id="area_dropdown">
+                                    <property name="hexpand">True</property>
+                                    <property name="tooltip-text" translatable="yes">Area to Record</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="KoohaToggleButton">
+                                    <property name="action-name">win.show-area-border</property>
+                                    <property name="default-icon-name">view-conceal-symbolic</property>
+                                    <property name="toggled-icon-name">view-reveal-symbolic</property>
+                                    <property name="default-tooltip-text" translatable="yes">Show Area Border</property>
+                                    <property name="toggled-tooltip-text" translatable="yes">Hide Area Border</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkBox">
+                                <property name="spacing">6</property>
+                                <property name="homogeneous">True</property>
+                                <child>
+                                  <object class="GtkButton" id="mark_area_button">
+                                    <property name="label" translatable="yes">Mark Area</property>
+                                    <property name="tooltip-text" translatable="yes">Mark a New Area on the Screen</property>
+                                    <property name="action-name">win.mark-area</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkButton">
+                                    <property name="label" translatable="yes">Areas…</property>
+                                    <property name="tooltip-text" translatable="yes">Manage the Saved Areas</property>
+                                    <property name="action-name">app.show-areas</property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
                           <object class="GtkBox">
                             <property name="spacing">12</property>
                             <property name="homogeneous">True</property>

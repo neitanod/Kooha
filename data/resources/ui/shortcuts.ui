@@ -80,6 +80,12 @@
             <property name="action-name">win.show-pointer</property>
           </object>
         </child>
+        <child>
+          <object class="AdwShortcutsItem">
+            <property name="title" translatable="yes" context="shortcut window">Toggle Area Border</property>
+            <property name="accelerator">&lt;Control&gt;b</property>
+          </object>
+        </child>
       </object>
     </child>
   </object>
