@@ -107,12 +107,17 @@ pub fn path() -> PathBuf {
 }
 
 /// In tests, a per-process temporary directory: no test may touch the
-/// user's areas.
+/// user's areas. Each call gets its own file, so that a test that saves
+/// an area can't change what the next one loads.
 #[cfg(test)]
 pub fn path() -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
         .join(format!("kooha-test-{}", std::process::id()))
-        .join("rectangles.json")
+        .join(format!("rectangles-{n}.json"))
 }
 
 /// Reads the areas file at `path`. A missing file is an empty one. An
@@ -407,7 +412,13 @@ mod tests {
     fn tests_never_use_the_real_config_dir() {
         let path = path();
         let dir = std::env::temp_dir().join(format!("kooha-test-{}", std::process::id()));
-        assert_eq!(path, dir.join("rectangles.json"));
+        assert_eq!(path.parent().unwrap(), dir);
+        assert!(!path.starts_with(glib::user_config_dir()));
+    }
+
+    #[test]
+    fn each_test_store_gets_its_own_file() {
+        assert_ne!(path(), path());
     }
 
     #[test]

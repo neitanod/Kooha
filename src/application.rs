@@ -8,6 +8,7 @@ use gtk::{
 
 use crate::{
     about,
+    areas::AreaStore,
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
@@ -29,6 +30,7 @@ mod imp {
         pub(super) settings: OnceCell<Settings>,
         pub(super) tray: OnceCell<TrayService>,
         pub(super) camera_pip: OnceCell<CameraPip>,
+        pub(super) area_store: OnceCell<AreaStore>,
         /// The last snapshot the window sent, reused on settings changes.
         pub(super) tray_snapshot: Cell<Option<RecordingSnapshot>>,
     }
@@ -68,6 +70,16 @@ mod imp {
             obj.setup_accels();
             obj.setup_tray();
             obj.setup_camera_pip();
+        }
+
+        fn shutdown(&self) {
+            // `dispose` doesn't run while a closure still holds the PiP, so
+            // give the camera its control back here too.
+            if let Some(pip) = self.obj().camera_pip() {
+                pip.restore_camera_controls();
+            }
+
+            self.parent_shutdown();
         }
     }
 
@@ -115,6 +127,15 @@ impl Application {
 
             settings
         })
+    }
+
+    /// The saved areas, loaded on first use. In tests, `areas::file::path`
+    /// points to a temporary file, so this never reads the user's list.
+    pub fn area_store(&self) -> AreaStore {
+        self.imp()
+            .area_store
+            .get_or_init(AreaStore::load_default)
+            .clone()
     }
 
     /// The camera `PiP`, created in `startup`.
@@ -496,6 +517,22 @@ mod tests {
 
         assert!(window.recording_snapshot().is_none());
         assert!(app.imp().tray.get().is_none());
+    }
+
+    #[gtk::test]
+    fn area_store_without_startup_stays_off_the_user_config() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+
+        let app = Application::new();
+        let _window = Window::new(&app);
+        let store = app.area_store();
+
+        assert!(store.areas().is_empty());
+        assert!(store.path().starts_with(std::env::temp_dir()));
+        assert!(!store.path().starts_with(glib::user_config_dir()));
+        assert_eq!(app.area_store().path(), store.path());
     }
 
     #[gtk::test]

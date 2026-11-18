@@ -279,7 +279,8 @@ impl AreaStore {
         )
     }
 
-    fn path(&self) -> &Path {
+    /// Where the list is saved.
+    pub fn path(&self) -> &Path {
         self.imp().path.get().unwrap()
     }
 
