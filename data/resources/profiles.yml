@@ -1,6 +1,8 @@
 # Note:
 # - videoenc and audioenc will be connected directly to the muxer
 # - audioenc and muxer are optional, but if audioenc is set, muxer must also be set
+# - ${H264_ENCODER} will be replaced with the chain of the H.264 encoder of
+#   the recording (src/encoder.rs), before ${N_THREADS}
 # - ${N_THREADS} will be replaced with ideal thread count
 # - default suggested-max-fps is 60
 
@@ -22,9 +24,7 @@ supported:
     name: MP4
     extension: mp4
     videoenc: >
-      videoconvert chroma-mode=none dither=none matrix-mode=output-only n-threads=${N_THREADS} !
-      x264enc qp-max=17 speed-preset=ultrafast threads=${N_THREADS} !
-      capsfilter caps=video/x-h264,profile=baseline !
+      ${H264_ENCODER} !
       queue !
       h264parse
     audioenc: >
@@ -38,9 +38,7 @@ supported:
     name: Matroska
     extension: mkv
     videoenc: >
-      videoconvert chroma-mode=none dither=none matrix-mode=output-only n-threads=${N_THREADS} !
-      x264enc qp-max=17 speed-preset=ultrafast threads=${N_THREADS} !
-      capsfilter caps=video/x-h264,profile=baseline !
+      ${H264_ENCODER} !
       queue !
       h264parse
     audioenc: >

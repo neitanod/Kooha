@@ -126,13 +126,22 @@ impl Profile {
         self.data().is_experimental
     }
 
+    /// Whether the video encoder is the H.264 encoder of the recording, the
+    /// `${H264_ENCODER}` marker.
+    pub fn uses_h264_encoder(&self) -> bool {
+        self.data().videoenc_bin_str.contains("${H264_ENCODER}")
+    }
+
     /// The factory names of the elements of the encoder and muxer bins: the
     /// first token of each `!`-separated part, without caps or properties.
+    /// The H.264 encoder counts as the CPU one.
     pub fn required_elements(&self) -> Vec<String> {
         let data = self.data();
 
+        let videoenc_bin_str = expand(&data.videoenc_bin_str, H264Encoder::Cpu);
+
         [
-            Some(&data.videoenc_bin_str),
+            Some(&videoenc_bin_str),
             data.audioenc_bin_str.as_ref(),
             data.muxer_bin_str.as_ref(),
         ]
@@ -152,6 +161,8 @@ impl Profile {
             .is_ok()
     }
 
+    /// Whether the profile parses, with the CPU encoder for H.264: a hardware
+    /// encoder is checked when recording.
     fn is_available_inner(&self) -> Result<()> {
         parse_bin_test(&self.data().videoenc_bin_str).context("Failed to parse videoenc bin")?;
 
@@ -166,6 +177,8 @@ impl Profile {
         Ok(())
     }
 
+    /// `attach_with` the CPU encoder.
+    #[cfg(test)]
     pub fn attach(
         &self,
         pipeline: &gst::Pipeline,
@@ -173,7 +186,25 @@ impl Profile {
         audio_srcs: Option<&gst::Element>,
         sink: &gst::Element,
     ) -> Result<()> {
-        let videoenc_bin = parse_bin("kooha-videoenc-bin", &self.data().videoenc_bin_str)?;
+        self.attach_with(pipeline, video_src, audio_srcs, sink, H264Encoder::Cpu)
+    }
+
+    /// Links the encoder and muxer bins between the sources and `sink`, with
+    /// `encoder` for the H.264 profiles.
+    pub fn attach_with(
+        &self,
+        pipeline: &gst::Pipeline,
+        video_src: &gst::Element,
+        audio_srcs: Option<&gst::Element>,
+        sink: &gst::Element,
+        encoder: H264Encoder,
+    ) -> Result<()> {
+        let videoenc_bin = parse_bin_inner(
+            "kooha-videoenc-bin",
+            &self.data().videoenc_bin_str,
+            true,
+            encoder,
+        )?;
         debug_assert!(videoenc_bin.iterate_elements().into_iter().any(|element| {
             let factory = element.unwrap().factory().unwrap();
             factory.has_type(gst::ElementFactoryType::VIDEO_ENCODER)
@@ -242,22 +273,22 @@ pub fn expand(description: &str, encoder: H264Encoder) -> String {
 
 fn parse_bin_test(description: &str) -> Result<(), glib::Error> {
     // Empty names are ignored in implementation details of `gst::parse::bin_from_description_with_name_full`
-    parse_bin_inner("", description, false)?;
+    parse_bin_inner("", description, false, H264Encoder::Cpu)?;
 
     Ok(())
 }
 
 fn parse_bin(name: &str, description: &str) -> Result<gst::Bin, glib::Error> {
-    parse_bin_inner(name, description, true)
+    parse_bin_inner(name, description, true, H264Encoder::Cpu)
 }
 
 fn parse_bin_inner(
     name: &str,
     description: &str,
     add_ghost_pads: bool,
+    encoder: H264Encoder,
 ) -> Result<gst::Bin, glib::Error> {
-    let ideal_n_threads = glib::num_processors().min(MAX_THREAD_COUNT);
-    let formatted_description = description.replace("${N_THREADS}", &ideal_n_threads.to_string());
+    let formatted_description = expand(description, encoder);
     let bin = gst::parse::bin_from_description_with_name_full(
         &formatted_description,
         add_ghost_pads,
@@ -330,6 +361,105 @@ mod tests {
         assert!(elements.contains(&"x264enc".to_string()));
         assert!(elements.contains(&"mp4mux".to_string()));
         assert!(elements.iter().all(|e| !e.contains('=')));
+    }
+
+    #[test]
+    fn only_mp4_and_matroska_use_the_h264_encoder() {
+        init_resources();
+
+        let ids = Profile::all()
+            .unwrap()
+            .iter()
+            .filter(|profile| profile.uses_h264_encoder())
+            .map(Profile::id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["mp4", "matroska-h264"]);
+    }
+
+    #[test]
+    fn profiles_without_the_encoder_marker_expand_as_before() {
+        init_resources();
+
+        let n_threads = glib::num_processors().min(MAX_THREAD_COUNT).to_string();
+        for id in ["webm-vp8", "gif"] {
+            let description = &Profile::from_id(id).unwrap().data().videoenc_bin_str;
+            for encoder in [H264Encoder::Intel, H264Encoder::Nvidia, H264Encoder::Cpu] {
+                assert_eq!(
+                    expand(description, encoder),
+                    description.replace("${N_THREADS}", &n_threads)
+                );
+            }
+        }
+    }
+
+    /// Attaches `profile` with `encoder` to a pipeline of fake elements.
+    fn attach_with(profile: &Profile, encoder: H264Encoder) -> gst::Pipeline {
+        let pipeline = gst::Pipeline::new();
+        let video_src = gst::ElementFactory::make("fakesrc").build().unwrap();
+        let audio_src = gst::ElementFactory::make("fakesrc").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        pipeline.add_many([&video_src, &audio_src, &sink]).unwrap();
+
+        profile
+            .attach_with(&pipeline, &video_src, Some(&audio_src), &sink, encoder)
+            .unwrap_or_else(|err| panic!("can't attach `{}` with {encoder:?}: {err:?}", profile.id()));
+        assert!(pipeline.find_unlinked_pad(gst::PadDirection::Sink).is_none());
+        assert!(pipeline.find_unlinked_pad(gst::PadDirection::Src).is_none());
+        pipeline
+    }
+
+    fn has_element(pipeline: &gst::Pipeline, factory_name: &str) -> bool {
+        pipeline.iterate_recurse().into_iter().any(|element| {
+            element
+                .unwrap()
+                .factory()
+                .is_some_and(|factory| factory.name() == factory_name)
+        })
+    }
+
+    #[test]
+    fn h264_profiles_parse_with_each_installed_encoder() {
+        init_resources();
+        gst::init().unwrap();
+
+        for id in ["mp4", "matroska-h264"] {
+            let profile = Profile::from_id(id).unwrap();
+            for encoder in [H264Encoder::Intel, H264Encoder::Nvidia, H264Encoder::Cpu] {
+                if !encoder.is_installed() {
+                    eprintln!("Skipped {encoder:?}: it is not installed");
+                    continue;
+                }
+
+                let pipeline = attach_with(profile, encoder);
+                for element in encoder.required_elements() {
+                    assert!(has_element(&pipeline, element), "{id} {encoder:?} {element}");
+                }
+                assert!(has_element(&pipeline, "h264parse"));
+            }
+        }
+    }
+
+    #[test]
+    fn h264_profiles_need_the_cpu_encoder_elements() {
+        init_resources();
+
+        let elements = Profile::from_id("matroska-h264")
+            .unwrap()
+            .required_elements();
+        assert_eq!(
+            elements,
+            [
+                "videoconvert",
+                "x264enc",
+                "capsfilter",
+                "queue",
+                "h264parse",
+                "audioconvert",
+                "opusenc",
+                "queue",
+                "matroskamux"
+            ]
+        );
     }
 
     #[test]

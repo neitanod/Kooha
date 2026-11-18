@@ -27,6 +27,7 @@ use crate::{
     areas::{self, ChosenArea, MarkedArea, MonitorInfo},
     cancelled::Cancelled,
     capture_warnings::CaptureWarnings,
+    encoder::{self, H264Encoder},
     experimental::Feature,
     help::ContextWithHelp,
     i18n::gettext_f,
@@ -37,11 +38,15 @@ use crate::{
     screencast_portal::{
         CursorMode, PersistMode, Proxy, Session, SourceType, Stream, WindowIdentifier,
     },
-    settings::{CaptureMode, Settings},
+    settings::{CaptureMode, Settings, VideoEncoder},
     timer::Timer,
 };
 
 const DURATION_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// The size the H.264 encoder is probed with when a stream does not tell
+/// its size.
+const UNKNOWN_OUTPUT_SIZE: (i32, i32) = (1280, 720);
 
 #[derive(Debug)]
 pub struct NoProfileError;
@@ -72,6 +77,8 @@ pub struct CaptureConfig {
     /// The area to record without the upstream selector, from
     /// `area_to_record`.
     pub area: Option<ChosenArea>,
+    /// Used only by the profiles that encode H.264 (ADR 0006).
+    pub encoder: VideoEncoder,
 }
 
 impl CaptureConfig {
@@ -88,6 +95,7 @@ impl CaptureConfig {
             pause_flash: settings.pause_flash(),
             pause_flash_color: settings.pause_flash_color().into(),
             area,
+            encoder: settings.video_encoder(),
         })
     }
 
@@ -98,6 +106,42 @@ impl CaptureConfig {
             self.record_microphone,
             self.show_pointer,
         )
+    }
+}
+
+/// The H.264 encoder to record `profile` with, or `None` when the profile
+/// does not encode H.264, which never runs `works`. A forced encoder that
+/// does not work is an error that says how to fix it (ADR 0006).
+pub async fn h264_encoder_for<F, Fut>(
+    profile: &Profile,
+    pref: VideoEncoder,
+    works: F,
+) -> Result<Option<H264Encoder>>
+where
+    F: Fn(H264Encoder) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    if !profile.uses_h264_encoder() {
+        return Ok(None);
+    }
+
+    match encoder::resolve(pref, works).await {
+        Ok(encoder) => Ok(Some(encoder)),
+        Err(reason) => {
+            // Automatic fails only when its last candidate, the CPU, does.
+            let failed = encoder::candidates(pref)
+                .last()
+                .copied()
+                .unwrap_or(H264Encoder::Cpu);
+            Err(Error::msg(reason).context(ContextWithHelp::new(
+                gettext_f(
+                    // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+                    "The {encoder} encoder is not working",
+                    &[("encoder", failed.name())],
+                ),
+                gettext("Choose Automatic or CPU in Preferences."),
+            )))
+        }
     }
 }
 
@@ -580,6 +624,21 @@ impl Recording {
         pipeline_builder
             .pause_gate(imp.pause_gate.clone())
             .pause_flash(config.pause_flash.then_some(config.pause_flash_color));
+
+        // Probed with the size of the recording, known once the stream and
+        // the crop are (ADR 0006).
+        let output_size = pipeline_builder.output_size().unwrap_or_else(|| {
+            tracing::warn!("Unknown output size: probing the encoder with {UNKNOWN_OUTPUT_SIZE:?}");
+            UNKNOWN_OUTPUT_SIZE
+        });
+        if let Some(encoder) = h264_encoder_for(config.profile, config.encoder, |encoder| {
+            encoder.works(output_size)
+        })
+        .await?
+        {
+            tracing::info!(?encoder, ?output_size, "Recording with this H.264 encoder");
+            pipeline_builder.encoder(encoder);
+        }
 
         // Build pipeline
         let pipeline = pipeline_builder.build().with_context(|| {
@@ -1169,6 +1228,83 @@ mod tests {
 
         settings.reset("saving-location");
         settings.reset("pause-flash");
+    }
+
+    #[test]
+    fn config_reads_the_encoder() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        settings.reset("profile-id");
+        temp_saving_location(&settings);
+        settings.set_video_encoder(VideoEncoder::Nvidia);
+
+        let config = CaptureConfig::from_settings(&settings, None).unwrap();
+        settings.set_video_encoder(VideoEncoder::Cpu);
+        assert_eq!(config.encoder, VideoEncoder::Nvidia);
+
+        settings.reset("saving-location");
+        settings.reset("video-encoder");
+    }
+
+    /// Picks the encoder for the profile `id` with a fake probe where only
+    /// `working` work, and returns the result and the encoders tried.
+    fn encoder_with(
+        id: &str,
+        pref: VideoEncoder,
+        working: &[H264Encoder],
+    ) -> (Result<Option<H264Encoder>>, Vec<H264Encoder>) {
+        init_resources();
+
+        let tried = RefCell::new(Vec::new());
+        let result = block_on(h264_encoder_for(
+            Profile::from_id(id).unwrap(),
+            pref,
+            |encoder| {
+                tried.borrow_mut().push(encoder);
+                std::future::ready(if working.contains(&encoder) {
+                    Ok(())
+                } else {
+                    Err(format!("{encoder:?} has no device"))
+                })
+            },
+        ));
+        (result, tried.into_inner())
+    }
+
+    #[test]
+    fn webm_and_gif_need_no_h264_encoder() {
+        for id in ["webm-vp8", "gif"] {
+            let (result, tried) = encoder_with(id, VideoEncoder::Intel, &[]);
+            assert_eq!(result.unwrap(), None, "{id}");
+            assert!(tried.is_empty(), "{id}");
+        }
+    }
+
+    #[test]
+    fn h264_profiles_resolve_the_encoder() {
+        for id in ["mp4", "matroska-h264"] {
+            let (result, tried) = encoder_with(id, VideoEncoder::Auto, &[H264Encoder::Cpu]);
+            assert_eq!(result.unwrap(), Some(H264Encoder::Cpu), "{id}");
+            assert_eq!(tried, crate::encoder::AUTO_ORDER, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_forced_encoder_that_fails_explains_how_to_fix_it() {
+        let (result, tried) = encoder_with("mp4", VideoEncoder::Intel, &[H264Encoder::Cpu]);
+        assert_eq!(tried, [H264Encoder::Intel]);
+
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), "The Intel encoder is not working");
+        assert_eq!(
+            err.downcast_ref::<ContextWithHelp>().unwrap().help_message(),
+            "Choose Automatic or CPU in Preferences."
+        );
+        assert!(format!("{err:?}").contains("Intel has no device"));
     }
 
     fn area_on(connector: &str, monitor: (i32, i32), scale: f64) -> MarkedArea {

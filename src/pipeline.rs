@@ -14,6 +14,7 @@ use std::{
 use crate::{
     area_selector::SelectAreaData,
     device::{self, DeviceClass},
+    encoder::H264Encoder,
     pause_gate::{FlashColor, PauseGate},
     profile::Profile,
     screencast_portal::Stream,
@@ -35,6 +36,7 @@ pub struct PipelineBuilder {
     area_crop: Option<AreaCrop>,
     pause_gate: PauseGate,
     pause_flash: Option<FlashColor>,
+    encoder: H264Encoder,
 }
 
 impl PipelineBuilder {
@@ -57,6 +59,7 @@ impl PipelineBuilder {
             area_crop: None,
             pause_gate: PauseGate::default(),
             pause_flash: None,
+            encoder: H264Encoder::Cpu,
         }
     }
 
@@ -95,6 +98,30 @@ impl PipelineBuilder {
         self
     }
 
+    /// The H.264 encoder, for the profiles that use one. The CPU by default.
+    pub fn encoder(&mut self, encoder: H264Encoder) -> &mut Self {
+        self.encoder = encoder;
+        self
+    }
+
+    /// The size of the frames the encoder gets, or `None` when a stream does
+    /// not tell its size.
+    pub fn output_size(&self) -> Option<(i32, i32)> {
+        if let Some(area) = self.area_crop {
+            return Some((area.width, area.height));
+        }
+
+        if let Some(ref data) = self.select_area_data {
+            return Some(scaled_caps_size(cropped_size(&compute_crop(data))));
+        }
+
+        // The compositor puts the streams side by side.
+        self.streams.iter().try_fold((0, 0), |(width, height), stream| {
+            let (stream_width, stream_height) = stream.size()?;
+            Some((width + stream_width, height.max(stream_height)))
+        })
+    }
+
     /// Builds the pipeline.
     ///
     /// With an area crop, `videocrop` cuts the area in stream pixels and
@@ -112,6 +139,7 @@ impl PipelineBuilder {
             file_path = %self.file_path.display(),
             framerate = ?self.framerate,
             profile = ?self.profile.id(),
+            encoder = ?self.encoder,
             fd = self.fd,
             stream_len = self.streams.len(),
             streams = ?self.streams,
@@ -197,11 +225,12 @@ impl PipelineBuilder {
         };
 
         self.profile
-            .attach(
+            .attach_with(
                 &pipeline,
                 &videoenc_queue,
                 audioenc_queue.as_ref(),
                 &filesink,
+                self.encoder,
             )
             .with_context(|| {
                 format!(
@@ -930,6 +959,96 @@ mod test {
         height: 720,
         expected_frame: (1680, 1050),
     };
+
+    fn has_factory(pipeline: &gst::Pipeline, name: &str) -> bool {
+        pipeline
+            .iterate_recurse()
+            .into_iter()
+            .any(|element| factory_name(&element.unwrap()) == name)
+    }
+
+    #[test]
+    fn the_cpu_encoder_is_the_default() {
+        let pipeline = built_pipeline(|_| {});
+
+        assert!(has_factory(&pipeline, "x264enc"));
+    }
+
+    #[test]
+    fn the_chosen_encoder_is_attached() {
+        gst::init().unwrap();
+        for encoder in [H264Encoder::Intel, H264Encoder::Nvidia] {
+            if !encoder.is_installed() {
+                eprintln!("Skipped {encoder:?}: it is not installed");
+                continue;
+            }
+
+            let pipeline = built_pipeline(|builder| {
+                builder.encoder(encoder);
+            });
+            assert!(!has_factory(&pipeline, "x264enc"), "{encoder:?}");
+            for element in encoder.required_elements() {
+                assert!(has_factory(&pipeline, element), "{encoder:?} {element}");
+            }
+        }
+    }
+
+    fn stream_of(size: Option<(i32, i32)>) -> Stream {
+        let text = match size {
+            Some((width, height)) => format!("(uint32 63, {{'size': <({width}, {height})>}})"),
+            None => "(uint32 63, @a{sv} {})".to_string(),
+        };
+        glib::Variant::parse(Some(&Stream::static_variant_type()), &text)
+            .unwrap()
+            .get::<Stream>()
+            .unwrap()
+    }
+
+    fn builder_for(sizes: &[Option<(i32, i32)>]) -> PipelineBuilder {
+        PipelineBuilder::new(
+            PathBuf::from("/tmp/kooha-pipeline-test-unused.mp4"),
+            gst::Fraction::new(30, 1),
+            Profile::from_id("mp4").unwrap().clone(),
+            -1,
+            sizes.iter().copied().map(stream_of).collect(),
+        )
+    }
+
+    #[test]
+    fn output_size_of_an_area_is_the_area() {
+        init_resources();
+
+        let mut builder = builder_for(&[Some((1680, 1050))]);
+        builder.area_crop(AREA);
+        assert_eq!(builder.output_size(), Some((1280, 720)));
+    }
+
+    #[test]
+    fn output_size_of_the_selector_is_the_scaled_crop() {
+        init_resources();
+
+        let mut builder = builder_for(&[Some((1921, 1081))]);
+        builder.select_area_data(select_area_data((1921, 1081)));
+        assert_eq!(builder.output_size(), Some((800, 600)));
+    }
+
+    #[test]
+    fn output_size_of_whole_streams_is_side_by_side() {
+        init_resources();
+
+        assert_eq!(
+            builder_for(&[Some((1920, 1080))]).output_size(),
+            Some((1920, 1080))
+        );
+        assert_eq!(
+            builder_for(&[Some((1920, 1080)), Some((2560, 1600))]).output_size(),
+            Some((4480, 1600))
+        );
+        assert_eq!(
+            builder_for(&[Some((1920, 1080)), None]).output_size(),
+            None
+        );
+    }
 
     #[test]
     fn area_crop_needs_no_videoscale() {

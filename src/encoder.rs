@@ -34,6 +34,15 @@ pub enum H264Encoder {
 }
 
 impl H264Encoder {
+    /// The name shown to the user. Brand names are not translated.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Intel => "Intel",
+            Self::Nvidia => "NVIDIA",
+            Self::Cpu => "CPU",
+        }
+    }
+
     /// The `gst-launch` chain from raw video to `video/x-h264`, before
     /// `queue ! h264parse`. It has `${N_THREADS}`: use it through
     /// `profile::expand`.
