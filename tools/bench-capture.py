@@ -24,23 +24,33 @@ Sources:
     --source portal  A ScreenCast portal session for one monitor, restored with
                      Kooha's `screencast-restore-token`, so KDE shows no dialog
                      once permission was granted. Run it from the user's
-                     graphical session. It opens a window with a moving ball,
-                     which has to be inside the measured area
-                     (`--no-ball-window` leaves it out). All the variants and
-                     frame rates share one session.
+                     graphical session. Once the stream arrives, it opens a
+                     fullscreen window with a ball that bounces inside the
+                     measured area, on the monitor whose physical size matches
+                     the stream (`--no-ball-window` leaves it out). All the
+                     variants and frame rates share one session. A pass where
+                     the source delivered under 90 % of the requested frames
+                     in the `today` variant is marked as discarded: the
+                     screen did not change often enough to measure.
 
-The restore token (portal only). Before opening the session the current token
-is saved to /tmp/kooha-bench-token.bak. A token is single use: KDE hands out a
-new one with every session, and the script writes it back to Kooha's key as
-soon as Start answers, before any pipeline runs, but only when the session
-started without a dialog (Start answered in under 2 s, or `--allow-dialog`)
-and the stream is a monitor. Otherwise the old token is spent and the next
-Kooha recording will ask for permission; the script says so. Restoring the
-.bak does not help then: that token is already spent.
+The restore token (portal and --probe-session). Before opening the session the
+current token is saved to /tmp/kooha-bench-token.bak. Start spends the token:
+KDE hands out a successor with every session. The script writes the successor
+to Kooha's key as soon as Start answers, before any pipeline runs, when the
+session started without a dialog (Start answered in under 2 s) and the stream
+is a monitor; it says when it leaves the key alone. If KDE showed the dialog,
+the key stays as it was and the script stops, unless `--allow-dialog`.
+
+The .bak is only restored by hand
+(`gsettings set io.github.seadve.Kooha screencast-restore-token "$(cat
+/tmp/kooha-bench-token.bak)"`). That helps when KDE asks every time because
+it sees another app id than Kooha's: then Kooha's original token is intact.
 
     --probe-session    Only opens and closes the session, to check whether KDE
                        accepts Kooha's token from a process that is not Kooha.
-    --allow-dialog     Write the new token even if KDE showed the dialog.
+    --allow-dialog     Go on measuring even if KDE showed the dialog; the key
+                       is still left as it was.
+    --write-token      With --allow-dialog, write the successor anyway.
     --with-kde-region  At the end, opens a second session without the token for
                        KDE's own region sharing (pick a 1280x720 region in the
                        dialog) and records it as the `kde-region` variant. Its
@@ -120,6 +130,7 @@ PORTAL_ONLY = {"intel-dmabuf", "nvidia-dmabuf"}
 KDE_REGION = "kde-region"
 STARTUP_TIMEOUT = 15
 NO_DIALOG_SECONDS = 2.0
+MIN_SOURCE_SHARE = 0.9
 TOKEN_BACKUP = "/tmp/kooha-bench-token.bak"
 KOOHA_SCHEMA = "io.github.seadve.Kooha"
 RESTORE_TOKEN_KEY = "screencast-restore-token"
@@ -532,49 +543,62 @@ def write_restore_token(token):
     )
 
 
-def token_writer(allow_dialog):
-    """The on_started handler for Kooha's own session: writes the new token."""
+class DialogShown(Exception):
+    pass
+
+
+def token_writer(allow_dialog, write_token):
+    """The on_started handler for Kooha's own session.
+
+    Writes the successor token to Kooha's key when the session started without
+    a dialog and the stream is a monitor. Raises DialogShown if KDE showed the
+    dialog and `allow_dialog` is off.
+    """
 
     def on_started(results, seconds):
         streams = results.get("streams", [])
         is_monitor = len(streams) == 1 and (
             streams[0][1].get("source_type", 0) == SOURCE_MONITOR
         )
-        no_dialog = seconds < NO_DIALOG_SECONDS
+        dialog = seconds >= NO_DIALOG_SECONDS
         new_token = results.get("restore_token", "")
         print(f"Start answered in {seconds:.1f} s", flush=True)
-        if not (no_dialog or allow_dialog):
-            print(
-                "KDE showed the dialog: the token was not accepted. It is "
-                "spent, so the next Kooha recording will ask for permission.",
-                flush=True,
+
+        if dialog and not allow_dialog:
+            raise DialogShown(
+                "KDE showed the dialog: Kooha's key is left as it was. Run "
+                "with --allow-dialog to measure anyway."
             )
+        if dialog and not write_token:
+            print("KDE showed the dialog: Kooha's key is left as it was.", flush=True)
         elif not is_monitor:
             print(
-                "The stream is not a monitor: the new token is not written, "
-                "so the next Kooha recording will ask for permission.",
+                "The stream is not a monitor: Kooha's key is left as it was.",
                 flush=True,
             )
         elif not new_token:
             print(
-                "KDE gave no new token, so the next Kooha recording will ask "
-                "for permission.",
+                "KDE gave no successor token: Kooha's key is left as it was, "
+                "and its token is spent.",
                 flush=True,
             )
         else:
             write_restore_token(new_token)
-            print("Wrote the new token to Kooha's key.", flush=True)
+            print("Wrote the successor token to Kooha's key.", flush=True)
 
     return on_started
 
 
-def open_kooha_session(portal, allow_dialog):
+def open_kooha_session(portal, args):
     token = read_restore_token()
     with open(TOKEN_BACKUP, "w") as f:
         f.write(token + "\n")
     print(f"Saved the current token to {TOKEN_BACKUP}", flush=True)
     return portal.open(
-        SOURCE_MONITOR, PERSIST_UNTIL_REVOKED, token, token_writer(allow_dialog)
+        SOURCE_MONITOR,
+        PERSIST_UNTIL_REVOKED,
+        token,
+        token_writer(args.allow_dialog, args.write_token),
     )
 
 
@@ -585,18 +609,68 @@ def open_region_session(portal):
     return portal.open(SOURCE_MONITOR | SOURCE_VIRTUAL, PERSIST_NONE, "", on_started)
 
 
-def ball_window(seconds):
-    """Shows a moving ball, so the shared monitor has something that moves."""
-    pipeline = Gst.parse_launch(
-        "videotestsrc pattern=ball is-live=true ! "
-        "video/x-raw,width=1280,height=720,framerate=60/1 ! "
-        "videoconvert ! autovideosink"
-    )
-    pipeline.set_state(Gst.State.PLAYING)
-    pipeline.get_bus().timed_pop_filtered(
-        int(seconds * Gst.SECOND), Gst.MessageType.ERROR | Gst.MessageType.EOS
-    )
-    pipeline.set_state(Gst.State.NULL)
+def ball_window(seconds, stream_size):
+    """Shows a ball bouncing inside AREA, fullscreen on the monitor whose
+    physical size is `stream_size`, so the stream has something that moves.
+    """
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gdk, Gtk
+
+    Gtk.init()
+    monitors = Gdk.Display.get_default().get_monitors()
+    monitor = None
+    for i in range(monitors.get_n_items()):
+        candidate = monitors.get_item(i)
+        geometry = candidate.get_geometry()
+        scale = candidate.get_scale()
+        size = (round(geometry.width * scale), round(geometry.height * scale))
+        if size == stream_size:
+            monitor = candidate
+            break
+    if monitor is None:
+        print(f"No monitor is {stream_size[0]}x{stream_size[1]}; no ball window")
+        return
+    scale = monitor.get_scale()
+
+    # The area in logical pixels, which is what the window draws in.
+    x, y, width, height = (v / scale for v in AREA)
+    radius = 40 / scale
+    ball = {"x": x + radius, "y": y + radius, "dx": 600 / scale, "dy": 420 / scale}
+    last = {"time": None}
+
+    def draw(_area, cr, _width, _height):
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        cr.set_source_rgb(1, 1, 1)
+        cr.arc(ball["x"], ball["y"], radius, 0, 6.2832)
+        cr.fill()
+
+    def tick(widget, clock):
+        now = clock.get_frame_time() / 1e6
+        step = 0.0 if last["time"] is None else now - last["time"]
+        last["time"] = now
+        for axis, delta, low, high in (
+            ("x", "dx", x + radius, x + width - radius),
+            ("y", "dy", y + radius, y + height - radius),
+        ):
+            ball[axis] += ball[delta] * step
+            if not low <= ball[axis] <= high:
+                ball[delta] = -ball[delta]
+                ball[axis] = min(max(ball[axis], low), high)
+        widget.queue_draw()
+        return True
+
+    canvas = Gtk.DrawingArea()
+    canvas.set_draw_func(draw)
+    canvas.add_tick_callback(tick)
+    window = Gtk.Window(title="Kooha capture bench")
+    window.set_child(canvas)
+    window.fullscreen_on_monitor(monitor)
+    window.present()
+
+    loop = GLib.MainLoop()
+    GLib.timeout_add_seconds(int(seconds), loop.quit)
+    loop.run()
 
 
 # --- main --------------------------------------------------------------------
@@ -622,9 +696,11 @@ def parse_args(argv):
     parser.add_argument("--out", help="also write the tables to this file")
     parser.add_argument("--no-ball-window", action="store_true")
     parser.add_argument("--allow-dialog", action="store_true")
+    parser.add_argument("--write-token", action="store_true")
     parser.add_argument("--with-kde-region", action="store_true")
     parser.add_argument("--probe-session", action="store_true")
     parser.add_argument("--ball-window", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--ball-size", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -638,15 +714,33 @@ def run_all(variants, source, rates, seconds, stream, lines):
         block = ["", header, "", TABLE_HEADER]
         print("\n".join(block), flush=True)
         lines.extend(block)
+        discarded = None
         for variant in variants:
-            row = run_variant(variant, source, fps, seconds, stream).row()
-            print(row, flush=True)
-            lines.append(row)
+            result = run_variant(variant, source, fps, seconds, stream)
+            print(result.row(), flush=True)
+            lines.append(result.row())
+            if variant == "today" and result.source_fps < MIN_SOURCE_SHARE * fps:
+                discarded = (
+                    f"**Discarded pass:** the source delivered {result.source_fps:.1f} "
+                    f"of {fps} FPS in `today` (under {MIN_SOURCE_SHARE:.0%})."
+                )
+        if discarded:
+            print(f"\n{discarded}", flush=True)
+            lines.extend(["", discarded])
 
 
-def start_ball_window(seconds):
+def start_ball_window(seconds, stream_size):
+    size = f"{stream_size[0]}x{stream_size[1]}"
     ball = subprocess.Popen(
-        [sys.executable, "-I", __file__, "--ball-window", str(seconds)]
+        [
+            sys.executable,
+            "-I",
+            __file__,
+            "--ball-window",
+            str(seconds),
+            "--ball-size",
+            size,
+        ]
     )
     time.sleep(2)
     return ball
@@ -663,13 +757,14 @@ def main(argv):
     Gst.init(None)
 
     if args.ball_window is not None:
-        ball_window(args.ball_window)
+        width, height = (int(v) for v in args.ball_size.split("x"))
+        ball_window(args.ball_window, (width, height))
         return 0
 
     if args.probe_session:
         portal = Portal()
         try:
-            stream = open_kooha_session(portal, args.allow_dialog)
+            stream = open_kooha_session(portal, args)
             print(f"Session open: node {stream['node']}, size {stream['size']}")
             os.close(stream["fd"])
         finally:
@@ -693,9 +788,9 @@ def main(argv):
         try:
             portal = Portal()
             try:
-                stream = open_kooha_session(portal, args.allow_dialog)
+                stream = open_kooha_session(portal, args)
                 if not args.no_ball_window:
-                    ball = start_ball_window(ball_seconds)
+                    ball = start_ball_window(ball_seconds, stream["size"])
                 run_all(variants, "portal", rates, args.seconds, stream, lines)
             finally:
                 portal.close()
@@ -717,4 +812,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except DialogShown as e:
+        sys.exit(str(e))
