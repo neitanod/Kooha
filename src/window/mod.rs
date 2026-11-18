@@ -1,3 +1,4 @@
+mod areas;
 mod progress_icon;
 mod toggle_button;
 
@@ -37,6 +38,8 @@ mod imp {
     #[derive(Debug, Default, gtk::CompositeTemplate)]
     #[template(resource = "/io/github/seadve/Kooha/ui/window.ui")]
     pub struct Window {
+        #[template_child]
+        pub(super) toast_overlay: TemplateChild<adw::ToastOverlay>,
         #[template_child]
         pub(super) title: TemplateChild<adw::WindowTitle>,
         #[template_child]
@@ -128,6 +131,7 @@ mod imp {
 
             obj.setup_settings();
             obj.setup_camera_button();
+            obj.setup_areas();
 
             obj.update_view();
             obj.update_title_label();
@@ -195,6 +199,10 @@ glib::wrapper! {
 impl Window {
     pub fn new(app: &Application) -> Self {
         glib::Object::builder().property("application", app).build()
+    }
+
+    pub fn add_toast(&self, toast: adw::Toast) {
+        self.imp().toast_overlay.add_toast(toast);
     }
 
     /// Returns `true` if the window is busy with a recording.
@@ -811,6 +819,22 @@ impl Window {
         self.add_action(&settings.create_camera_device_action());
     }
 
+    /// Shows the notices of the saved areas as toasts.
+    fn setup_areas(&self) {
+        let store = Application::get().area_store();
+
+        if let Some(notice) = areas::notice_for_store(&store) {
+            self.add_toast(adw::Toast::new(&notice));
+        }
+        store.connect_save_failed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_, message| {
+                obj.add_toast(adw::Toast::new(message));
+            }
+        ));
+    }
+
     fn setup_camera_button(&self) {
         let camera_button = &self.imp().camera_button;
 
@@ -1071,6 +1095,20 @@ mod tests {
             )
             .and_then(|value| value.get::<String>());
         assert_eq!(label.as_deref(), Some("_Requirements Report"));
+    }
+
+    #[gtk::test]
+    fn toasts_cover_the_whole_window() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        crate::settings::test_utils::setup_schema();
+        crate::settings::test_utils::init_resources();
+        gst::init().unwrap();
+
+        let window = Window::new(&Application::new());
+
+        let toast_overlay = window.imp().toast_overlay.get();
+        assert_eq!(window.content(), Some(toast_overlay.upcast()));
+        window.add_toast(adw::Toast::new("Hello"));
     }
 
     #[gtk::test]
