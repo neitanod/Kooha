@@ -11,10 +11,11 @@ use gettextrs::gettext;
 use gst::prelude::*;
 use gtk::{gio, glib, prelude::*};
 
-use self::checks::ProfileElements;
+use self::checks::{EncoderProbe, ProfileElements};
 use crate::{
     camera_pip::devices,
     device::{self, DeviceClass},
+    encoder::H264Encoder,
     experimental::Feature,
     overlay::OverlayUnavailable,
     profile::Profile,
@@ -26,6 +27,9 @@ use crate::{
 const DBUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
+
+/// The size the hardware encoders are probed with.
+const ENCODER_PROBE_SIZE: (i32, i32) = (1280, 720);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -114,7 +118,7 @@ impl Report {
     }
 }
 
-/// Runs the eight checks in the order of the spec. They only read the system,
+/// Runs the nine checks in the order of the spec. They only read the system,
 /// except the recordings folder check, which creates and removes a temporary
 /// file in that folder.
 ///
@@ -129,6 +133,7 @@ pub async fn run(settings: &Settings, overlays: Result<(), OverlayUnavailable>) 
         &settings.string("profile-id"),
         Feature::ExperimentalFormats.is_enabled(),
     );
+    let hardware_encoders = checks::hardware_encoders(&probe_hardware_encoders().await);
     let portal = checks::portal(query_portal().await, &desktop);
     let pipewire = checks::pipewire(pipewire_socket().exists(), pipewire_version());
     let audio = checks::audio(
@@ -144,8 +149,48 @@ pub async fn run(settings: &Settings, overlays: Result<(), OverlayUnavailable>) 
     let folder_writable = folder_exists && checks::probe_writable(&folder);
     let recordings_folder = checks::recordings_folder(&folder, folder_exists, folder_writable);
 
+    report(Checks {
+        gstreamer,
+        hardware_encoders,
+        portal,
+        pipewire,
+        audio,
+        cameras,
+        overlays,
+        tray,
+        recordings_folder,
+    })
+}
+
+/// The result of each check, named so that none is left out of the report.
+struct Checks {
+    gstreamer: CheckResult,
+    hardware_encoders: CheckResult,
+    portal: CheckResult,
+    pipewire: CheckResult,
+    audio: CheckResult,
+    cameras: CheckResult,
+    overlays: CheckResult,
+    tray: CheckResult,
+    recordings_folder: CheckResult,
+}
+
+fn report(checks: Checks) -> Report {
+    let Checks {
+        gstreamer,
+        hardware_encoders,
+        portal,
+        pipewire,
+        audio,
+        cameras,
+        overlays,
+        tray,
+        recordings_folder,
+    } = checks;
+
     Report(vec![
         gstreamer,
+        hardware_encoders,
         portal,
         pipewire,
         audio,
@@ -154,6 +199,20 @@ pub async fn run(settings: &Settings, overlays: Result<(), OverlayUnavailable>) 
         tray,
         recordings_folder,
     ])
+}
+
+/// Runs the probe of the Intel and NVIDIA encoders, the ones Automatic tries
+/// before the CPU.
+async fn probe_hardware_encoders() -> Vec<EncoderProbe> {
+    let mut probes = Vec::new();
+    for encoder in [H264Encoder::Intel, H264Encoder::Nvidia] {
+        probes.push(EncoderProbe {
+            encoder,
+            missing_element: encoder.missing_element(),
+            result: encoder.works(ENCODER_PROBE_SIZE).await,
+        });
+    }
+    probes
 }
 
 fn profile_elements() -> Vec<ProfileElements> {
@@ -327,6 +386,43 @@ mod tests {
                 .to_text()
                 .ends_with("    What stops working: C impact\n    How to fix it: C note\n")
         );
+    }
+
+    #[test]
+    fn report_has_every_check_in_order() {
+        let report = report(Checks {
+            gstreamer: check("GStreamer", Status::Ok),
+            hardware_encoders: check("Encoders", Status::Warning),
+            portal: check("Portal", Status::Ok),
+            pipewire: check("PipeWire", Status::Ok),
+            audio: check("Audio", Status::Ok),
+            cameras: check("Cameras", Status::Ok),
+            overlays: check("Overlays", Status::Ok),
+            tray: check("Tray", Status::Ok),
+            recordings_folder: check("Folder", Status::Ok),
+        });
+
+        let titles = report
+            .0
+            .iter()
+            .map(|check| check.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            [
+                "GStreamer",
+                "Encoders",
+                "Portal",
+                "PipeWire",
+                "Audio",
+                "Cameras",
+                "Overlays",
+                "Tray",
+                "Folder"
+            ]
+        );
+        // A hardware encoder that fails only warns: the CPU still records.
+        assert!(!report.has_failures());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The eight checks of the requirements report. Each one receives what it
+//! The nine checks of the requirements report. Each one receives what it
 //! queried, so the decision is testable without the real system.
 
 use std::{
@@ -12,6 +12,7 @@ use gettextrs::gettext;
 
 use super::{CheckResult, Failure, Status};
 use crate::{
+    encoder::H264Encoder,
     i18n::{gettext_f, ngettext_f},
     overlay::OverlayUnavailable,
     screencast_portal::CursorMode,
@@ -101,9 +102,19 @@ const PACKAGES: [(&str, &[&str]); 7] = [
     ("gstreamer1.0-plugins-ugly", &["x264enc"]),
     (
         "gstreamer1.0-plugins-bad",
-        &["h264parse", "av1enc", "jpegparse"],
+        &[
+            "h264parse",
+            "av1enc",
+            "jpegparse",
+            "nvh264enc",
+            "cudaupload",
+            "cudaconvert",
+        ],
     ),
-    ("gstreamer1.0-plugins-extra", &["vapostproc", "vah264enc"]),
+    (
+        "gstreamer1.0-plugins-extra",
+        &["vapostproc", "vah264enc", "vah264lpenc"],
+    ),
 ];
 
 const BUNDLED_ELEMENTS: [&str; 2] = ["gifenc", "gtk4paintablesink"];
@@ -264,6 +275,84 @@ pub fn gstreamer_elements(
 
 /// `result` holds the portal version and its pointer modes; `desktop` is
 /// `XDG_CURRENT_DESKTOP`.
+/// What the probe of a hardware encoder found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderProbe {
+    pub encoder: H264Encoder,
+    /// The first element of its chain that is not installed.
+    pub missing_element: Option<&'static str>,
+    pub result: Result<(), String>,
+}
+
+/// Which hardware encoders pass the probe. A failure only warns: the CPU
+/// encoder still records (ADR 0006).
+pub fn hardware_encoders(probes: &[EncoderProbe]) -> CheckResult {
+    let title = gettext("Hardware Video Encoders");
+
+    let failed = probes
+        .iter()
+        .filter(|probe| probe.result.is_err())
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        let names = probes
+            .iter()
+            .map(|probe| probe.encoder.name())
+            .collect::<Vec<_>>();
+        return ok(title, Some(names.join(", ")));
+    }
+
+    let problem = failed
+        .iter()
+        .map(|probe| {
+            let reason = probe.result.as_ref().err().map_or("", String::as_str);
+            format!("{}: {reason}.", probe.encoder.name())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let failed_names = failed
+        .iter()
+        .map(|probe| probe.encoder.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let missing = failed
+        .iter()
+        .filter_map(|probe| probe.missing_element)
+        .filter_map(|element| match package_for(element) {
+            Some(ElementSource::Package(package)) => Some(package),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // In the order of the package table.
+    let packages = PACKAGES
+        .iter()
+        .map(|(package, _)| *package)
+        .filter(|package| missing.contains(package))
+        .collect::<Vec<_>>();
+    let installed_but_failing = failed
+        .iter()
+        .filter(|probe| probe.missing_element.is_none())
+        .map(|probe| probe.encoder.name())
+        .collect::<Vec<_>>();
+
+    let failure = Failure {
+        problem,
+        impact: gettext_f(
+            "MP4 and Matroska cannot use these encoders: {encoders}. Automatic uses the next one, down to the CPU.",
+            &[("encoders", &failed_names)],
+        ),
+        fix_command: (!packages.is_empty())
+            .then(|| format!("sudo apt install {}", packages.join(" "))),
+        fix_note: (!installed_but_failing.is_empty()).then(|| {
+            gettext_f(
+                "Check the graphics driver for {encoders}.",
+                &[("encoders", &installed_but_failing.join(", "))],
+            )
+        }),
+    };
+    not_ok(title, Status::Warning, failure)
+}
+
 pub fn portal(result: Result<(u32, CursorMode)>, desktop: &str) -> CheckResult {
     let title = gettext("Screen Capture Portal");
 
@@ -746,6 +835,110 @@ mod tests {
                 "`{element}` is not in the package table"
             );
         }
+    }
+
+    #[test]
+    fn every_encoder_element_has_a_package() {
+        for encoder in [H264Encoder::Intel, H264Encoder::Nvidia, H264Encoder::Cpu] {
+            for element in encoder.required_elements() {
+                assert!(
+                    package_for(element).is_some(),
+                    "`{element}` is not in the package table"
+                );
+            }
+        }
+    }
+
+    // Hardware encoders
+
+    fn probe(
+        encoder: H264Encoder,
+        missing_element: Option<&'static str>,
+        result: Result<(), &str>,
+    ) -> EncoderProbe {
+        EncoderProbe {
+            encoder,
+            missing_element,
+            result: result.map_err(str::to_string),
+        }
+    }
+
+    #[test]
+    fn hardware_encoders_ok_lists_them() {
+        let check = hardware_encoders(&[
+            probe(H264Encoder::Intel, None, Ok(())),
+            probe(H264Encoder::Nvidia, None, Ok(())),
+        ]);
+        assert_eq!(check.title, "Hardware Video Encoders");
+        assert_eq!(check.status, Status::Ok);
+        assert_eq!(check.detail.as_deref(), Some("Intel, NVIDIA"));
+    }
+
+    #[test]
+    fn hardware_encoder_not_installed_is_a_warning_with_its_package() {
+        let check = hardware_encoders(&[
+            probe(
+                H264Encoder::Intel,
+                Some("vah264lpenc"),
+                Err("`vah264lpenc` is not installed"),
+            ),
+            probe(H264Encoder::Nvidia, None, Ok(())),
+        ]);
+        assert_eq!(check.status, Status::Warning);
+        let failure = failure(&check);
+        assert_eq!(failure.problem, "Intel: `vah264lpenc` is not installed.");
+        assert_eq!(
+            failure.impact,
+            "MP4 and Matroska cannot use these encoders: Intel. Automatic uses the next one, down to the CPU."
+        );
+        assert_eq!(
+            failure.fix_command.as_deref(),
+            Some("sudo apt install gstreamer1.0-plugins-extra")
+        );
+        assert_eq!(failure.fix_note, None);
+    }
+
+    #[test]
+    fn hardware_encoder_that_fails_points_at_the_driver() {
+        let check = hardware_encoders(&[
+            probe(H264Encoder::Intel, None, Ok(())),
+            probe(H264Encoder::Nvidia, None, Err("No CUDA device")),
+        ]);
+        assert_eq!(check.status, Status::Warning);
+        let failure = failure(&check);
+        assert_eq!(failure.problem, "NVIDIA: No CUDA device.");
+        assert_eq!(failure.fix_command, None);
+        assert_eq!(
+            failure.fix_note.as_deref(),
+            Some("Check the graphics driver for NVIDIA.")
+        );
+    }
+
+    #[test]
+    fn hardware_encoders_both_failing() {
+        let check = hardware_encoders(&[
+            probe(
+                H264Encoder::Intel,
+                Some("vah264lpenc"),
+                Err("`vah264lpenc` is not installed"),
+            ),
+            probe(
+                H264Encoder::Nvidia,
+                Some("nvh264enc"),
+                Err("`nvh264enc` is not installed"),
+            ),
+        ]);
+        assert_eq!(check.status, Status::Warning);
+        let failure = failure(&check);
+        assert_eq!(
+            failure.problem,
+            "Intel: `vah264lpenc` is not installed. NVIDIA: `nvh264enc` is not installed."
+        );
+        assert!(failure.impact.contains("Intel, NVIDIA"));
+        assert_eq!(
+            failure.fix_command.as_deref(),
+            Some("sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-extra")
+        );
     }
 
     // Portal
