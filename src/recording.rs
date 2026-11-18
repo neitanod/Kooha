@@ -44,10 +44,6 @@ use crate::{
 
 const DURATION_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The size the H.264 encoder is probed with when a stream does not tell
-/// its size.
-const UNKNOWN_OUTPUT_SIZE: (i32, i32) = (1280, 720);
-
 #[derive(Debug)]
 pub struct NoProfileError;
 
@@ -133,16 +129,37 @@ where
                 .last()
                 .copied()
                 .unwrap_or(H264Encoder::Cpu);
-            Err(Error::msg(reason).context(ContextWithHelp::new(
-                gettext_f(
-                    // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-                    "The {encoder} encoder is not working",
-                    &[("encoder", failed.name())],
-                ),
-                gettext("Choose Automatic or CPU in Preferences."),
-            )))
+            Err(Error::msg(reason).context(encoder_help(failed)))
         }
     }
+}
+
+/// What to tell when `encoder` does not work.
+fn encoder_help(encoder: H264Encoder) -> ContextWithHelp {
+    ContextWithHelp::new(
+        gettext_f(
+            // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+            "The {encoder} encoder is not working",
+            &[("encoder", encoder.name())],
+        ),
+        gettext("Choose Automatic or CPU in Preferences."),
+    )
+}
+
+/// The help for an error of the recording's pipeline posted by `src`, when
+/// `src` is an element of the chain of `encoder`, the pipeline's encoder.
+/// The probe runs at a fixed size for whole streams, so an encoder can still
+/// fail with the size of the real frames.
+fn encoder_error_help(
+    encoder: Option<H264Encoder>,
+    src: Option<&gst::Object>,
+) -> Option<ContextWithHelp> {
+    let encoder = encoder?;
+    let factory = src?.downcast_ref::<gst::Element>()?.factory()?;
+    encoder
+        .required_elements()
+        .contains(&factory.name().as_str())
+        .then(|| encoder_help(encoder))
 }
 
 /// Whether recording in `mode` has to mark an area first: in Selection mode
@@ -413,6 +430,8 @@ mod imp {
         pub(super) pipeline: OnceCell<gst::Pipeline>,
         pub(super) bus_watch_guard: RefCell<Option<BusWatchGuard>>,
         pub(super) area_border: RefCell<Option<(BorderGeometry, gdk::Monitor)>>,
+        /// The H.264 encoder of the pipeline, if it has one.
+        pub(super) encoder: Cell<Option<H264Encoder>>,
     }
 
     #[glib::object_subclass]
@@ -625,19 +644,16 @@ impl Recording {
             .pause_gate(imp.pause_gate.clone())
             .pause_flash(config.pause_flash.then_some(config.pause_flash_color));
 
-        // Probed with the size of the recording, known once the stream and
-        // the crop are (ADR 0006).
-        let output_size = pipeline_builder.output_size().unwrap_or_else(|| {
-            tracing::warn!("Unknown output size: probing the encoder with {UNKNOWN_OUTPUT_SIZE:?}");
-            UNKNOWN_OUTPUT_SIZE
-        });
+        // Probed with the size of the area, known once the crop is (ADR 0006).
+        let probe_size = pipeline_builder.probe_size();
         if let Some(encoder) = h264_encoder_for(config.profile, config.encoder, |encoder| {
-            encoder.works(output_size)
+            encoder.works(probe_size)
         })
         .await?
         {
-            tracing::info!(?encoder, ?output_size, "Recording with this H.264 encoder");
+            tracing::info!(?encoder, ?probe_size, "Recording with this H.264 encoder");
             pipeline_builder.encoder(encoder);
+            imp.encoder.set(Some(encoder));
         }
 
         // Build pipeline
@@ -968,7 +984,9 @@ impl Recording {
                     .context(e.debug().unwrap_or_else(|| "<no debug>".into()))
                     .context(gettext("An error occurred while recording"));
 
-                let error = if e.error().matches(gst::ResourceError::OpenWrite) {
+                let error = if let Some(help) = encoder_error_help(imp.encoder.get(), e.src()) {
+                    error.context(help)
+                } else if e.error().matches(gst::ResourceError::OpenWrite) {
                     error.context(ContextWithHelp::new(
                         gettext_f(
                             // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
@@ -1307,6 +1325,33 @@ mod tests {
             "Choose Automatic or CPU in Preferences."
         );
         assert!(format!("{err:?}").contains("Intel has no device"));
+    }
+
+    fn element(factory: &str) -> gst::Object {
+        gst::init().unwrap();
+        gst::ElementFactory::make(factory)
+            .build()
+            .unwrap()
+            .upcast()
+    }
+
+    #[test]
+    fn an_encoder_error_while_recording_explains_how_to_fix_it() {
+        let help = encoder_error_help(Some(H264Encoder::Cpu), Some(&element("x264enc"))).unwrap();
+        assert_eq!(help.to_string(), "The CPU encoder is not working");
+        assert_eq!(help.help_message(), "Choose Automatic or CPU in Preferences.");
+    }
+
+    #[test]
+    fn other_errors_while_recording_have_no_encoder_help() {
+        // Not an element of the chosen encoder's chain.
+        assert!(
+            encoder_error_help(Some(H264Encoder::Intel), Some(&element("x264enc"))).is_none()
+        );
+        assert!(encoder_error_help(Some(H264Encoder::Cpu), Some(&element("filesink"))).is_none());
+        // A profile with no H.264 encoder, or no source.
+        assert!(encoder_error_help(None, Some(&element("x264enc"))).is_none());
+        assert!(encoder_error_help(Some(H264Encoder::Cpu), None).is_none());
     }
 
     fn area_on(connector: &str, monitor: (i32, i32), scale: f64) -> MarkedArea {
