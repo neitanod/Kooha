@@ -9,6 +9,7 @@ use gtk::{
 use crate::{
     about,
     areas::AreaStore,
+    areas_window::AreasWindow,
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
@@ -31,6 +32,8 @@ mod imp {
         pub(super) tray: OnceCell<TrayService>,
         pub(super) camera_pip: OnceCell<CameraPip>,
         pub(super) area_store: OnceCell<AreaStore>,
+        /// Hidden, not destroyed, when closed.
+        pub(super) areas_window: glib::WeakRef<AreasWindow>,
         /// The last snapshot the window sent, reused on settings changes.
         pub(super) tray_snapshot: Cell<Option<RecordingSnapshot>>,
     }
@@ -136,6 +139,19 @@ impl Application {
             .area_store
             .get_or_init(AreaStore::load_default)
             .clone()
+    }
+
+    /// The Areas window, built over the main window the first time. Closing
+    /// it only hides it, so it is reused until the main window goes.
+    fn areas_window(&self) -> AreasWindow {
+        let imp = self.imp();
+        if let Some(window) = imp.areas_window.upgrade() {
+            return window;
+        }
+
+        let window = AreasWindow::new(&self.area_store(), &self.window());
+        imp.areas_window.set(Some(&window));
+        window
     }
 
     /// The camera `PiP`, created in `startup`.
@@ -405,6 +421,11 @@ impl Application {
                 RequirementsDialog::present_and_run(&obj.window(), obj.settings());
             })
             .build();
+        let show_areas_action = gio::ActionEntry::builder("show-areas")
+            .activate(|obj: &Self, _, _| {
+                obj.areas_window().present();
+            })
+            .build();
         let show_about_action = gio::ActionEntry::builder("show-about")
             .activate(|obj: &Self, _, _| {
                 about::present_dialog(&obj.window());
@@ -416,6 +437,7 @@ impl Application {
             quit_action,
             show_preferences_action,
             show_requirements_report_action,
+            show_areas_action,
             show_about_action,
         ]);
     }
@@ -546,6 +568,40 @@ mod tests {
         app.setup_gactions();
 
         assert!(app.lookup_action("show-requirements-report").is_some());
+    }
+
+    #[gtk::test]
+    fn show_areas_action() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        app.setup_gactions();
+
+        assert!(app.lookup_action("show-areas").is_some());
+    }
+
+    /// `app.show-areas` presents the same window each time, over the main
+    /// window, whose actions mark the areas.
+    #[gtk::test]
+    fn areas_window_is_reused_over_the_main_window() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let first = app.areas_window();
+        let second = app.areas_window();
+
+        assert_eq!(first, second);
+        assert!(
+            first
+                .transient_for()
+                .is_some_and(|parent| parent.is::<Window>())
+        );
     }
 
     #[test]
