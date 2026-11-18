@@ -1,0 +1,248 @@
+{
+  "id": "kooha-rectangulos-rendimiento-v1",
+  "task": "1092",
+  "eyebrow": "grill-with-docs · task 1092 · hilo 1149",
+  "title": "Kooha: rectángulos guardados y rendimiento de la captura",
+  "subtitle": "##1092 · Qué decidir antes de escribir la spec de los rectángulos con nombre y de la captura más liviana.",
+  "intro": [
+    "Cada pregunta trae mi recomendación tildada. Con lo que contestes escribo la spec, un mock de la capa de marcado y de la ventana de la lista, y el plan.",
+    "Dos cosas que ya están fijas y no pregunto: un rectángulo vive en **un solo monitor** (KDE comparte un monitor por vez, así que el arrastre queda limitado al monitor donde empezó), y el borde punteado se dibuja **por fuera** del rectángulo, así que nunca sale en el video.",
+    "Codificadores que ya están instalados en la notebook, comprobado con GStreamer: `x264enc` (el de hoy, por CPU), `vah264lpenc` (H.264 por hardware en la Intel) y `nvh264enc` (H.264 por hardware en la NVIDIA)."
+  ],
+  "sections": [
+    {
+      "title": "A · Marcar el rectángulo",
+      "note": "La capa transparente apenas oscurecida sobre cada monitor, con la que marcás arrastrando sobre la pantalla real.",
+      "questions": [
+        {
+          "id": "relacion-selector",
+          "text": "¿Qué pasa con el selector actual de Kooha (la ventanita que muestra la pantalla que mandó KDE y te deja recortar)?",
+          "why": "Define si el modo Selección cambia para siempre o si conviven dos formas de marcar. Con la capa nueva, marcar ocurre antes de grabar y sin el diálogo de KDE.",
+          "type": "single",
+          "options": [
+            { "id": "reemplaza", "label": "La capa reemplaza a la ventanita en el modo Selección", "note": "Una sola forma de marcar, siempre sobre la pantalla real. Se pierde el selector de upstream; si algún día falla gtk4-layer-shell (por ejemplo en X11), Kooha vuelve a la ventanita." },
+            { "id": "conviven", "label": "Conviven: la capa para los rectángulos guardados, la ventanita queda como está", "note": "Cero riesgo para lo que ya anda, pero mantiene la selección doble que te resultaba incómoda." },
+            { "id": "preferencia", "label": "Una preferencia elige cuál usar", "note": "Flexible, pero es una opción más que mantener y probar." }
+          ],
+          "recommend": "reemplaza",
+          "rationale": "Es la forma cómoda de marcar y además es la única que le da a Kooha el monitor y las coordenadas. Dejo la ventanita como respaldo automático cuando la capa no está disponible."
+        },
+        {
+          "id": "ajustar",
+          "text": "Después de soltar el arrastre, ¿qué se puede hacer antes de confirmar?",
+          "why": "Para una demo el tamaño importa al píxel, y un arrastre a mano rara vez cae justo.",
+          "type": "multi",
+          "options": [
+            { "id": "manijas", "label": "Mover y redimensionar con manijas en bordes y esquinas", "note": "Como en Spectacle. Enter confirma, Escape cancela." },
+            { "id": "medidas", "label": "Ver el ancho × alto en píxeles mientras arrastrás", "note": "En píxeles del video, que es lo que vas a querer replicar." },
+            { "id": "tipear", "label": "Tipear un tamaño exacto (por ejemplo 1280×720) y que el rectángulo se ajuste", "note": "Útil para demos con tamaño estándar." },
+            { "id": "flechas", "label": "Mover de a un píxel con las flechas del teclado", "note": "Ajuste fino sin mouse." }
+          ],
+          "recommend": ["manijas", "medidas", "tipear"],
+          "rationale": "Manijas y medidas son lo mínimo para que sirva en una demo; tipear el tamaño resuelve el caso «quiero exactamente 1280×720»."
+        },
+        {
+          "id": "unidad",
+          "text": "¿En qué píxeles se muestran y se guardan las medidas del rectángulo?",
+          "why": "En la notebook el monitor escala la imagen: lo que ves como 1463 de ancho son 2560 píxeles en el video. Las dos cifras son ciertas y dicen cosas distintas.",
+          "type": "single",
+          "options": [
+            { "id": "video", "label": "Píxeles del video (los físicos del monitor)", "note": "La cifra coincide con la resolución del archivo que sale." },
+            { "id": "pantalla", "label": "Píxeles de la pantalla (los lógicos, con la escala aplicada)", "note": "Coincide con lo que ves y con las herramientas de KDE, pero el video sale más grande que el número." }
+          ],
+          "recommend": "video",
+          "rationale": "Para replicar una demo lo que importa es el tamaño del archivo. Kooha guarda además la resolución y la escala del monitor, para darse cuenta si cambiaron."
+        },
+        {
+          "id": "guardar-al-soltar",
+          "text": "Al confirmar un rectángulo, ¿cómo se ofrece guardarlo?",
+          "why": "Define si marcar un rectángulo de una vez obliga a ponerle nombre.",
+          "type": "single",
+          "options": [
+            { "id": "opcional", "label": "Aparece un campo «Guardar como…» optativo; si no le ponés nombre queda como «Último rectángulo» fuera de la lista", "note": "No ensucia la lista con rectángulos de una sola vez." },
+            { "id": "siempre", "label": "Siempre pide un nombre y lo agrega a la lista", "note": "La lista crece con todo lo que marcás." },
+            { "id": "boton", "label": "No pregunta; se guarda después desde la ventana de la lista", "note": "Marcar es más rápido, pero guardar lleva un paso más." }
+          ],
+          "recommend": "opcional",
+          "rationale": "Cubre los dos usos: el rectángulo de una sola vez y el de la demo que vas a repetir en un mes."
+        }
+      ]
+    },
+    {
+      "title": "B · La lista de rectángulos",
+      "questions": [
+        {
+          "id": "donde-lista",
+          "text": "¿Desde dónde elegís un rectángulo guardado?",
+          "why": "Elegir es la acción frecuente; renombrar y borrar son ocasionales.",
+          "type": "multi",
+          "options": [
+            { "id": "principal", "label": "Un desplegable en la ventana principal, al lado del modo Selección", "note": "Elegir a la vista, sin abrir otra ventana." },
+            { "id": "ventana", "label": "Una ventana «Rectángulos» para elegir, renombrar y borrar", "note": "La que pediste. Se abre desde el desplegable y desde el menú." },
+            { "id": "bandeja", "label": "Un submenú en el ícono de la bandeja", "note": "Elegís el rectángulo sin abrir Kooha." }
+          ],
+          "recommend": ["principal", "ventana", "bandeja"],
+          "rationale": "La ventana es lo que pediste; el desplegable y la bandeja hacen que elegir sea un clic."
+        },
+        {
+          "id": "que-guarda",
+          "text": "Además del monitor y las coordenadas, ¿qué guarda cada rectángulo?",
+          "why": "Para rehacer una demo dentro de un mes, puede servir que el rectángulo recuerde más que su geometría. Cada cosa extra es más pantalla y más código.",
+          "type": "multi",
+          "options": [
+            { "id": "solo-geometria", "label": "Sólo monitor y coordenadas", "note": "Lo mínimo." },
+            { "id": "nota", "label": "Una nota de texto libre", "note": "Por ejemplo «demo de Agencia, ventana del Hilo a la izquierda»." },
+            { "id": "pip", "label": "Si la cámara va prendida y dónde va el recuadro de la cámara", "note": "La demo se repite igual, con la cara en el mismo lugar." },
+            { "id": "formato", "label": "Formato y FPS", "note": "Útil si cada demo usa uno distinto." }
+          ],
+          "recommend": ["solo-geometria"],
+          "rationale": "Arrancaría con la geometría y dejaría el resto para cuando lo extrañes: es fácil de agregar después sin perder la lista."
+        },
+        {
+          "id": "archivo-lista",
+          "text": "¿Dónde vive la lista?",
+          "why": "Decide si la podés respaldar, copiar a otra máquina o editar a mano.",
+          "type": "single",
+          "options": [
+            { "id": "json", "label": "Un archivo `~/.config/kooha/rectangles.json`", "note": "Se respalda y se copia a otra máquina; se edita con cualquier editor." },
+            { "id": "gsettings", "label": "En la configuración de Kooha (GSettings), como el resto de las preferencias", "note": "Igual que lo demás, pero difícil de leer o copiar a mano." }
+          ],
+          "recommend": "json",
+          "rationale": "Una lista que dura meses conviene tenerla en un archivo que se ve y se respalda."
+        }
+      ]
+    },
+    {
+      "title": "C · El borde y la grabación",
+      "questions": [
+        {
+          "id": "borde-cuando",
+          "text": "¿Cuándo se ve el borde punteado del rectángulo elegido?",
+          "why": "Lo pediste visible desde que se elige, para acomodar las ventanas. Falta definir cuándo desaparece.",
+          "type": "multi",
+          "options": [
+            { "id": "antes", "label": "Desde que lo elegís hasta que empieza la grabación", "note": "Lo pedido." },
+            { "id": "durante", "label": "También durante la grabación, como hoy", "note": "Sabés en todo momento qué se está grabando." },
+            { "id": "ocultar", "label": "Un botón o atajo para ocultarlo y volverlo a mostrar", "note": "Por si molesta mientras trabajás con el rectángulo elegido." }
+          ],
+          "recommend": ["antes", "durante", "ocultar"],
+          "rationale": "Antes y durante es lo coherente con lo que ya hay; ocultarlo evita que un rectángulo elegido te deje un marco permanente en pantalla."
+        },
+        {
+          "id": "otro-monitor",
+          "text": "Si el rectángulo está en otro monitor que el que KDE recuerda de la grabación anterior, ¿qué hace Kooha?",
+          "why": "KDE no deja que Kooha elija el monitor: sólo puede pedirle que vuelva a preguntar, y el monitor lo elegís vos en el diálogo de KDE.",
+          "type": "single",
+          "options": [
+            { "id": "pide-y-avisa", "label": "Le pide a KDE que pregunte, te avisa qué monitor elegir (por ejemplo «elegí DP-3 entero»), y si elegís otro no graba y te lo dice", "note": "Nunca graba algo distinto de lo que elegiste." },
+            { "id": "pide-y-graba", "label": "Le pide a KDE que pregunte y graba lo que elijas, aunque no coincida", "note": "Si te equivocás de monitor, el recorte cae en cualquier lado." }
+          ],
+          "recommend": "pide-y-avisa",
+          "rationale": "Un video con el recorte corrido se descubre recién al verlo, cuando ya no se puede repetir la toma."
+        },
+        {
+          "id": "monitor-cambio",
+          "text": "Si el monitor del rectángulo cambió de resolución o de escala, o no está conectado, ¿qué hace Kooha?",
+          "why": "Las coordenadas guardadas dejan de corresponder a lo que se ve.",
+          "type": "single",
+          "options": [
+            { "id": "avisa-remarca", "label": "Lo marca como desactualizado en la lista, no deja grabarlo y ofrece volver a marcarlo", "note": "Lo más seguro." },
+            { "id": "escala", "label": "Lo escala en proporción a la resolución nueva y graba", "note": "Cómodo, pero el tamaño del video ya no es el de la demo original." }
+          ],
+          "recommend": "avisa-remarca",
+          "rationale": "El objetivo de guardar el rectángulo es repetir el mismo tamaño; escalarlo en silencio rompe justo eso."
+        }
+      ]
+    },
+    {
+      "title": "D · Rendimiento de la captura",
+      "note": "Hoy: perfil MP4 con `x264enc` ultrafast por CPU, a 30 FPS, y Kooha escala el cuadro entero antes de recortar.",
+      "questions": [
+        {
+          "id": "medir-como",
+          "text": "La medición de CPU y FPS necesita tu sesión de KDE real (el diálogo de compartir pantalla no se puede contestar solo). ¿Cómo la hacemos?",
+          "why": "Sin tu sesión no hay captura de pantalla que medir: mi entorno de pruebas aislado no entrega cuadros.",
+          "type": "single",
+          "options": [
+            { "id": "script", "label": "Te dejo un script que corrés una vez: graba el mismo rectángulo con cada variante unos segundos y te pide elegir en el diálogo de KDE", "note": "Unos 3 minutos tuyos, a ojo. El script guarda CPU, FPS reales y cuadros perdidos en un archivo que leo yo." },
+            { "id": "yo", "label": "Lo corro yo en tu sesión mientras no usás la máquina; vos sólo contestás el diálogo de KDE cuando aparece", "note": "Menos trabajo tuyo, pero la máquina queda ocupada durante la medición." },
+            { "id": "token", "label": "Usar un token de KDE ya aceptado para que no pregunte, y medir todo yo solo", "note": "Lo intento si KDE recuerda la elección; si pregunta igual, cae en la primera opción." }
+          ],
+          "recommend": "token",
+          "rationale": "Kooha ya guarda el permiso de KDE para no volver a preguntar. Si lo puedo reusar, mido sin molestarte; si no, te paso el script."
+        },
+        {
+          "id": "trucos",
+          "text": "¿Qué mejoras de la captura pruebo y mido?",
+          "why": "Pediste qué trucos tenemos bajo la manga. Cada uno se mide contra lo de hoy y entra sólo si mejora.",
+          "type": "multi",
+          "options": [
+            { "id": "recortar-primero", "label": "Recortar antes de escalar", "note": "Ya pedido. El escalado trabaja sólo con el rectángulo." },
+            { "id": "hw-intel", "label": "Codificar H.264 por hardware en la Intel (`vah264lpenc`)", "note": "Saca la codificación de la CPU y gasta poca batería." },
+            { "id": "hw-nvidia", "label": "Codificar H.264 por hardware en la NVIDIA (`nvh264enc`)", "note": "El más rápido para resoluciones grandes; despierta la placa NVIDIA y gasta más batería." },
+            { "id": "dmabuf", "label": "Pasar los cuadros de KDE al codificador por hardware sin copiarlos a la memoria de la CPU (DMA-BUF)", "note": "Es el ahorro más grande cuando funciona; depende de que KDE y GStreamer lo negocien bien." },
+            { "id": "colas", "label": "Ajustar las colas del pipeline para que un pico del codificador no haga perder cuadros", "note": "Barato; mejora la regularidad más que el promedio." },
+            { "id": "fps-reales", "label": "Mostrar en Kooha los FPS reales que se están grabando", "note": "Te deja ver si la toma salió entrecortada sin abrir el video." }
+          ],
+          "recommend": ["recortar-primero", "hw-intel", "hw-nvidia", "dmabuf", "colas"],
+          "rationale": "Las cinco se pueden medir con el mismo script. Mostrar los FPS reales es útil pero es interfaz nueva: lo dejaría para después de ver los números."
+        },
+        {
+          "id": "codificador-defecto",
+          "text": "¿Cómo elige Kooha el codificador al grabar en MP4?",
+          "why": "El formato del archivo (MP4, MKV) pesa poco; lo que define cuánto cuesta grabar es el codificador.",
+          "type": "single",
+          "options": [
+            { "id": "auto", "label": "Automático: usa el mejor por hardware que ande en la máquina y cae a `x264enc` si falla", "note": "El orden lo decide la medición." },
+            { "id": "preferencia", "label": "Una preferencia «Codificador» con Automático, Intel, NVIDIA y CPU", "note": "Control total; Automático por defecto." },
+            { "id": "perfiles", "label": "Perfiles separados en la lista de formatos (MP4 · Intel, MP4 · NVIDIA…)", "note": "Como hacía upstream con sus perfiles experimentales." }
+          ],
+          "recommend": "preferencia",
+          "rationale": "Automático por defecto, y la preferencia sirve para forzar la Intel cuando estás a batería o probar la NVIDIA cuando querés 60 FPS."
+        },
+        {
+          "id": "fps-objetivo",
+          "text": "¿A cuántos FPS querés poder grabar sin perder cuadros?",
+          "why": "Fija contra qué se mide y cuándo una mejora alcanza.",
+          "type": "single",
+          "options": [
+            { "id": "30", "label": "30 FPS, como hoy", "note": "Alcanza para demos de interfaz." },
+            { "id": "60", "label": "60 FPS", "note": "Movimiento fluido (scroll, animaciones); el doble de trabajo." }
+          ],
+          "recommend": "60",
+          "rationale": "Si la codificación por hardware rinde, 60 FPS debería salir sin cargar la CPU; medir contra 60 dice si se puede."
+        }
+      ]
+    },
+    {
+      "title": "E · La cámara con poca luz",
+      "note": "Pendiente de ###15433.",
+      "questions": [
+        {
+          "id": "camara-fps",
+          "text": "¿Sumo «Mantener los cuadros de la cámara» con el control `exposure_dynamic_framerate`?",
+          "why": "Con poca luz la webcam alarga la exposición y baja los FPS. Apagando ese control mantiene los 30 cuadros, con la imagen más oscura o con más grano. Para saber si tu cámara lo tiene hay que instalar `v4l-utils` (la herramienta `v4l2-ctl`) y listar sus controles, sin prenderla.",
+          "type": "single",
+          "options": [
+            { "id": "si-aca", "label": "Sí, en esta Task: instalo `v4l-utils`, miro si tu cámara lo tiene y, si lo tiene, sumo la preferencia (prendida por defecto)", "note": "Kooha aplica el control él mismo al prender la cámara; `v4l-utils` sólo sirve para mirar." },
+            { "id": "solo-mirar", "label": "Sólo mirá si la cámara lo tiene y contame", "note": "Decidimos con el dato en la mano." },
+            { "id": "no", "label": "No por ahora", "note": "" }
+          ],
+          "recommend": "si-aca",
+          "rationale": "Es chico y comparte el objetivo de la Task: que la toma salga fluida."
+        }
+      ]
+    },
+    {
+      "title": "F · Cierre",
+      "questions": [
+        {
+          "id": "olvido",
+          "text": "¿Qué me estoy olvidando de preguntar?",
+          "type": "open",
+          "placeholder": "En blanco = creo que nada."
+        }
+      ]
+    }
+  ]
+}
