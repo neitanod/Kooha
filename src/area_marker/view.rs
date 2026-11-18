@@ -174,6 +174,24 @@ impl MarkerLayer {
         self.0.update(true);
     }
 
+    /// Ends the drag in course, if any, as releasing the button would.
+    pub fn end_drag(&self) {
+        if self.0.state.borrow().is_dragging() {
+            self.0.state.borrow_mut().release();
+            self.0.update(true);
+        }
+    }
+
+    /// Presses at `from` and moves to `to`, in physical pixels, without
+    /// releasing.
+    #[cfg(test)]
+    pub fn drag_without_release(&self, from: (i32, i32), to: (i32, i32)) {
+        let slop = self.0.slop();
+        let mut state = self.0.state.borrow_mut();
+        state.press(from.0, from.1, slop);
+        state.motion(to.0, to.1);
+    }
+
     pub fn nudge(&self, dx: i32, dy: i32) {
         self.0.state.borrow_mut().nudge(dx, dy);
         self.0.update(false);

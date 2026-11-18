@@ -155,11 +155,15 @@ fn preload(initial: &MarkedArea, monitors: &[MonitorInfo]) -> Option<(usize, Rec
     ))
 }
 
-/// The marked area of `rect` on `monitor`.
+/// The marked area of `rect` on `monitor`, or `None` under the minimum
+/// size, which can't be recorded (codex code r1 #8).
 #[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
-fn finish(rect: Rect, monitor: &MonitorInfo) -> MarkedArea {
+fn finish(rect: Rect, monitor: &MonitorInfo) -> Option<MarkedArea> {
+    if rect.width < geometry::MIN_WIDTH || rect.height < geometry::MIN_HEIGHT {
+        return None;
+    }
     let (monitor_width, monitor_height) = monitor.physical_size();
-    MarkedArea {
+    Some(MarkedArea {
         connector: monitor.connector.clone(),
         x: rect.x,
         y: rect.y,
@@ -168,7 +172,7 @@ fn finish(rect: Rect, monitor: &MonitorInfo) -> MarkedArea {
         monitor_width,
         monitor_height,
         scale: monitor.scale,
-    }
+    })
 }
 
 /// Whether each layer has the rectangle and the pointer.
@@ -435,9 +439,13 @@ mod layers {
                     .map(|entry| entry.layer.clone()),
                 None => self.active_layer().map(|(_, layer)| layer),
             };
-            let Some(area) =
-                layer.and_then(|layer| layer.rect().map(|rect| finish(rect, layer.info())))
-            else {
+            let Some(layer) = layer else {
+                return false;
+            };
+            // Enter in the middle of a drag ends it first, which applies
+            // the minimum size.
+            layer.end_drag();
+            let Some(area) = layer.rect().and_then(|rect| finish(rect, layer.info())) else {
                 return false;
             };
             self.answer(Ok(area));
@@ -488,7 +496,10 @@ mod layers {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::{area_marker::geometry::Rect, areas::monitors};
+        use crate::{
+            area_marker::geometry::{MIN_HEIGHT, MIN_WIDTH, Rect},
+            areas::monitors,
+        };
 
         /// Two layers on the first monitor, as if they were two monitors:
         /// built, never presented.
@@ -614,7 +625,7 @@ mod layers {
                 }
             ));
             let area = glib::MainContext::default().block_on(result).unwrap();
-            assert_eq!(area, finish(rect_on_right(), &right));
+            assert_eq!(Some(area), finish(rect_on_right(), &right));
         }
 
         #[gtk::test]
@@ -653,6 +664,29 @@ mod layers {
             assert!(marker.handle(0, LayerEvent::Cancel));
             let err = glib::MainContext::default().block_on(result).unwrap_err();
             assert!(err.is::<Cancelled>());
+        }
+
+        #[gtk::test]
+        fn enter_while_dragging_releases_first() {
+            let Some((marker, result, _)) = two_layers(None) else {
+                return;
+            };
+            let layer = marker.layer(0).unwrap();
+            // Pressed, not moved, not released: a 0×0 rectangle.
+            layer.drag_without_release((40, 30), (40, 30));
+            assert_eq!(layer.rect().map(|rect| (rect.width, rect.height)), Some((0, 0)));
+
+            assert!(marker.handle(
+                0,
+                LayerEvent::Key {
+                    key: gdk::Key::Return,
+                    shift: false
+                }
+            ));
+            let area = glib::MainContext::default().block_on(result).unwrap();
+            assert_eq!((area.x, area.y), (40, 30));
+            assert_eq!((area.width, area.height), (MIN_WIDTH, MIN_HEIGHT));
+            assert!(!layer.state().is_dragging());
         }
 
         #[gtk::test]
@@ -744,11 +778,22 @@ mod tests {
     fn finish_records_the_monitor_in_physical_pixels() {
         assert_eq!(
             finish(rect(100, 80, 1280, 720), &dp3()),
-            area("DP-3", rect(100, 80, 1280, 720), (1680, 1050), 1.05)
+            Some(area("DP-3", rect(100, 80, 1280, 720), (1680, 1050), 1.05))
         );
         assert_eq!(
             finish(rect(0, 0, 2560, 1600), &edp()),
-            area("eDP-1", rect(0, 0, 2560, 1600), (2560, 1600), 1.75)
+            Some(area("eDP-1", rect(0, 0, 2560, 1600), (2560, 1600), 1.75))
+        );
+    }
+
+    #[test]
+    fn finish_refuses_a_rect_under_the_minimum() {
+        assert_eq!(finish(rect(100, 80, 0, 0), &dp3()), None);
+        assert_eq!(finish(rect(100, 80, 158, 720), &dp3()), None);
+        assert_eq!(finish(rect(100, 80, 1280, 118), &dp3()), None);
+        assert_eq!(
+            finish(rect(100, 80, 160, 120), &dp3()),
+            Some(area("DP-3", rect(100, 80, 160, 120), (1680, 1050), 1.05))
         );
     }
 
