@@ -31,8 +31,7 @@ pub struct ChangedControl {
 #[derive(Debug)]
 pub struct HeldControl {
     control: ChangedControl,
-    /// `None` if the lock file couldn't be opened.
-    _lock: Option<fs::File>,
+    _lock: fs::File,
 }
 
 /// Where the changed control is kept: the user state directory, or a
@@ -49,14 +48,16 @@ pub fn default_path() -> PathBuf {
 /// control to write back if it changed; if it did not, nothing is kept.
 ///
 /// Another Kooha holding the lock has a control changed already: this one
-/// changes nothing, as its value would replace the other's.
+/// changes nothing, as its value would replace the other's. Nor does it
+/// change anything if the lock fails: without it, another Kooha would take
+/// the control for a leftover (codex code r3 #2).
 pub fn change(
     path: &Path,
     control: ChangedControl,
     mut set: impl FnMut(&Path, i32) -> io::Result<()>,
 ) -> Option<HeldControl> {
     let lock = match try_lock(path) {
-        Ok(Some(lock)) => Some(lock),
+        Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::info!(
                 "Another Kooha keeps the frame rate of a camera; leaving {} as it is",
@@ -65,8 +66,13 @@ pub fn change(
             return None;
         }
         Err(err) => {
-            tracing::warn!("Failed to lock {}: {:?}", path.display(), err);
-            None
+            tracing::warn!(
+                "Failed to lock {}; leaving the frame rate of {} as it is: {:?}",
+                path.display(),
+                control.node.display(),
+                err
+            );
+            return None;
         }
     };
 
@@ -118,15 +124,15 @@ pub fn write_back(
 
 /// Writes back the control that a previous Kooha left changed, if any. A
 /// control whose lock another Kooha holds is that Kooha's, still running,
-/// and is left alone.
+/// and is left alone; so is one whose lock fails, as the owner can't be
+/// told (codex code r3 #2).
 pub fn restore_leftover(path: &Path, mut set: impl FnMut(&Path, i32) -> io::Result<()>) {
     if !path.exists() {
         return;
     }
 
-    // An error says nothing about an owner: restore, as before the lock.
     let lock = match try_lock(path) {
-        Ok(Some(lock)) => Some(lock),
+        Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::debug!(
                 "The camera control in {} belongs to a running Kooha",
@@ -135,8 +141,12 @@ pub fn restore_leftover(path: &Path, mut set: impl FnMut(&Path, i32) -> io::Resu
             return;
         }
         Err(err) => {
-            tracing::warn!("Failed to lock {}: {:?}", path.display(), err);
-            None
+            tracing::warn!(
+                "Failed to lock {}; keeping the camera control in it: {:?}",
+                path.display(),
+                err
+            );
+            return;
         }
     };
 
@@ -404,6 +414,74 @@ mod tests {
 
         assert_eq!(*calls.borrow(), [(PathBuf::from("/dev/video0"), 1)]);
         assert!(!path.exists());
+    }
+
+    /// Makes the lock of the state file at `path` impossible to take until
+    /// the returned guard is dropped: either its directory can't be written,
+    /// so the lock file can't be created, or the lock "file" is a directory.
+    fn break_lock(path: &Path, how: &str) -> impl Drop {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let dir = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let lock = lock_path(path);
+        let _ = fs::remove_file(&lock);
+        match how {
+            "unwritable directory" => {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+            }
+            "directory as lock" => fs::create_dir(&lock).unwrap(),
+            _ => unreachable!(),
+        }
+        Restore(dir)
+    }
+
+    const BROKEN_LOCKS: [&str; 2] = ["unwritable directory", "directory as lock"];
+
+    #[test]
+    fn a_leftover_whose_lock_fails_is_left_alone() {
+        for how in BROKEN_LOCKS {
+            let state = TempState::new(&format!("leftover-lock-fails-{}", how.replace(' ', "-")));
+            let path = &state.path;
+            save(path, &control("/dev/video2", 1)).unwrap();
+            let broken = break_lock(path, how);
+            let calls = RefCell::new(Vec::new());
+
+            // It may belong to a Kooha still recording (codex code r3 #2).
+            restore_leftover(path, recording_setter(&calls, || Ok(())));
+
+            drop(broken);
+            assert!(calls.borrow().is_empty(), "{how}");
+            assert_eq!(load(path), Some(control("/dev/video2", 1)), "{how}");
+        }
+    }
+
+    #[test]
+    fn a_control_whose_lock_fails_is_not_changed() {
+        for how in BROKEN_LOCKS {
+            let state = TempState::new(&format!("change-lock-fails-{}", how.replace(' ', "-")));
+            let path = &state.path;
+            let broken = break_lock(path, how);
+            let calls = RefCell::new(Vec::new());
+
+            let held = change(
+                path,
+                control("/dev/video0", 1),
+                recording_setter(&calls, || Ok(())),
+            );
+
+            drop(broken);
+            assert!(held.is_none(), "{how}");
+            assert!(calls.borrow().is_empty(), "{how}");
+            assert!(!path.exists(), "{how}");
+        }
     }
 
     #[test]
