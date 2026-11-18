@@ -143,5 +143,107 @@ class CropTest(unittest.TestCase):
         self.assert_area_size("crop-first-queues")
 
 
+PERIOD = bench.Gst.SECOND // 60
+
+
+def pts_without(missing, total=1200):
+    """The PTS of `total` frames at 60 FPS, minus the frames in `missing`."""
+    return [i * PERIOD for i in range(total) if i not in missing]
+
+
+class MissingFramesTest(unittest.TestCase):
+    def test_steady_source_misses_nothing(self):
+        self.assertEqual(bench.missing_frames(pts_without(set()), PERIOD), 0)
+
+    def test_one_long_gap(self):
+        missing = set(range(500, 540))
+
+        self.assertEqual(bench.missing_frames(pts_without(missing), PERIOD), 40)
+
+    def test_scattered_gaps(self):
+        missing = {30 * i + 7 for i in range(40)}
+
+        self.assertEqual(bench.missing_frames(pts_without(missing), PERIOD), 40)
+
+    def test_jitter_under_one_and_a_half_periods_is_no_gap(self):
+        pts = [0, PERIOD, int(2.5 * PERIOD), int(3.5 * PERIOD)]
+
+        self.assertEqual(bench.missing_frames(pts, PERIOD), 0)
+
+    def test_gap_rounds_to_the_nearest_frame_count(self):
+        # 1.6 periods: one frame missing; 3.4 periods: two.
+        pts = [0, int(1.6 * PERIOD), int(5.0 * PERIOD)]
+
+        self.assertEqual(bench.missing_frames(pts, PERIOD), 3)
+
+    def test_frames_without_pts_are_left_out(self):
+        pts = [0, bench.Gst.CLOCK_TIME_NONE, PERIOD, 2 * PERIOD]
+
+        self.assertEqual(bench.missing_frames(pts, PERIOD), 0)
+
+
+def result(missing=0, queue_drop=0, requested=1200):
+    """A pass at 60 FPS where videorate fills every hole up to `requested`."""
+    r = bench.Result("today")
+    r.source_frames = requested - missing
+    r.missing = missing
+    r.rate_in = r.source_frames - queue_drop
+    r.dup = missing + queue_drop
+    r.rate_out = requested
+    r.frames = requested
+    return r
+
+
+class ResultTest(unittest.TestCase):
+    def test_duplicates_do_not_hide_frames_missing_at_the_source(self):
+        r = result(missing=40)
+
+        self.assertEqual(r.frames, 1200)
+        self.assertEqual(r.queue_drop, 0)
+        self.assertFalse(r.ok)
+
+    def test_queue_drops_count(self):
+        self.assertFalse(result(queue_drop=13).ok)
+
+    def test_missing_and_dropped_add_up(self):
+        self.assertFalse(result(missing=7, queue_drop=6).ok)
+
+    def test_under_one_percent_is_ok(self):
+        self.assertTrue(result(missing=6, queue_drop=6).ok)
+
+    def test_nothing_recorded_is_not_ok(self):
+        self.assertFalse(bench.Result("today").ok)
+
+    def test_row_separates_the_counts(self):
+        cells = [c.strip() for c in result(missing=40, queue_drop=3).row().split("|")]
+        header = [c.strip() for c in bench.TABLE_HEADER.splitlines()[0].split("|")]
+        row = dict(zip(header, cells))
+
+        self.assertEqual(row["source frames"], "1160")
+        self.assertEqual(row["missing"], "40")
+        self.assertEqual(row["dup"], "43")
+        self.assertEqual(row["queue drop"], "3")
+        self.assertEqual(row["ok <1%"], "no")
+
+
+class RunVariantTest(unittest.TestCase):
+    def test_steady_test_source_misses_nothing(self):
+        with tempfile.TemporaryDirectory(prefix="kooha-bench-test-") as tmp:
+            r = bench.run_variant(
+                "crop-first-queues",
+                "test",
+                30,
+                1,
+                None,
+                out=os.path.join(tmp, "out.mp4"),
+            )
+
+        self.assertEqual(r.error, "")
+        self.assertGreater(r.source_frames, 25)
+        self.assertEqual(r.missing, 0)
+        self.assertEqual(r.queue_drop, 0)
+        self.assertTrue(r.ok)
+
+
 if __name__ == "__main__":
     unittest.main()

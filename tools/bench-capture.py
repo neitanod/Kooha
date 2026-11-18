@@ -3,7 +3,8 @@
 
 Records the same 1280x720 area at (200, 160) with each pipeline variant and
 prints one Markdown table per frame rate: frames the source delivered, frames
-lost on the way to the file, real FPS at the encoder output, CPU of this
+missing at the source, frames videorate duplicated, frames the queues dropped,
+whether the losses stay under 1 %, real FPS at the encoder output, CPU of this
 process, and whether the variant started at all.
 
 Usage:
@@ -87,14 +88,21 @@ Columns:
                    seconds to wake up); the measured window starts there
     source fps     buffers out of the source per second, in the window
     fps            buffers out of the encoder per second, in the window
-    source frames  buffers out of the source, up to EOS
-    frames         buffers out of the encoder, up to EOS
-    lost           frames the source delivered that did not reach the file,
-                   leaving out videorate's own work: frames lost before
-                   videorate (source frames - videorate in) plus frames lost
+    source frames  buffers out of the source, up to EOS: the frames captured
+    missing        frames missing at the source: the PTS of its buffers,
+                   before videorate, with each gap over 1.5 periods of the
+                   requested rate counted as round(gap / period) - 1 frames
+    dup            frames videorate duplicated to keep the rate; it fills
+                   what is missing at the source and what the leaky queue
+                   threw away, so `frames` alone hides both
+    queue drop     frames the queues dropped: lost before videorate (source
+                   frames - videorate in, the leaky capture queue) plus lost
                    after it (videorate out - frames)
-    dup, drop      frames videorate duplicated or dropped to keep the rate;
-                   dup also fills what the leaky queue threw away
+    ok <1%         "yes" when missing + queue drop stay within 1 % of the
+                   frames requested (what videorate pushed at the requested
+                   rate); "no" otherwise, or when nothing was recorded
+    frames         buffers out of the encoder, up to EOS
+    rate drop      frames videorate dropped because the source ran faster
     cpu %          utime + stime of this process (/proc/self/stat) in the
                    window, in % of one core; the test source's own rendering
                    counts too
@@ -133,6 +141,7 @@ PORTAL_ONLY = {"intel-dmabuf", "nvidia-dmabuf"}
 KDE_REGION = "kde-region"
 STARTUP_TIMEOUT = 15
 MIN_SOURCE_SHARE = 0.9
+LOSS_LIMIT = 0.01
 TOKEN_BACKUP = "/tmp/kooha-bench-token.bak"
 KOOHA_SCHEMA = "io.github.seadve.Kooha"
 RESTORE_TOKEN_KEY = "screencast-restore-token"
@@ -320,6 +329,7 @@ class Result:
         self.source_fps = 0.0
         self.fps = 0.0
         self.source_frames = 0
+        self.missing = 0
         self.frames = 0
         self.dup = 0
         self.drop = 0
@@ -328,41 +338,72 @@ class Result:
         self.cpu = 0.0
 
     @property
-    def lost(self):
+    def queue_drop(self):
         # videorate pushes one extra copy of the last frame at EOS, without
         # counting it as a duplicate; its in and out counters include it.
         return (self.source_frames - self.rate_in) + (self.rate_out - self.frames)
 
+    @property
+    def requested(self):
+        """The frames at the requested rate: what videorate pushed."""
+        return self.rate_out
+
+    @property
+    def ok(self):
+        lost = self.missing + self.queue_drop
+        return self.requested > 0 and lost <= LOSS_LIMIT * self.requested
+
     def row(self):
         started = "yes" if self.started else "no"
+        ok = "yes" if self.ok else "no"
         error = self.error.replace("|", "/").replace("\n", " ")
         return (
             f"| {self.variant} | {started} | {self.startup:.1f} | "
             f"{self.source_fps:.1f} | {self.fps:.1f} | {self.source_frames} | "
-            f"{self.frames} | {self.lost} | {self.dup} | {self.drop} | "
-            f"{self.cpu:.0f} | {error} |"
+            f"{self.missing} | {self.dup} | {self.queue_drop} | {ok} | "
+            f"{self.frames} | {self.drop} | {self.cpu:.0f} | {error} |"
         )
 
 
 TABLE_HEADER = (
-    "| variant | started | startup s | source fps | fps | source frames | frames "
-    "| lost | dup | drop | cpu % | error |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|"
+    "| variant | started | startup s | source fps | fps | source frames | missing "
+    "| dup | queue drop | ok <1% | frames | rate drop | cpu % | error |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 )
 
 
+def missing_frames(pts, period):
+    """Frames missing between consecutive PTS `period` nanoseconds apart.
+
+    A gap over 1.5 periods counts as round(gap / period) - 1 frames; a shorter
+    one is jitter. Buffers without a PTS are left out.
+    """
+    known = [p for p in pts if p != Gst.CLOCK_TIME_NONE]
+    missing = 0
+    for before, after in zip(known, known[1:]):
+        gap = after - before
+        if 2 * gap > 3 * period:
+            missing += round(gap / period) - 1
+    return missing
+
+
 class Counter:
-    """Counts the buffers through a pad and keeps their arrival times."""
+    """Counts the buffers through a pad and keeps their arrival times and
+    their PTS.
+    """
 
     def __init__(self):
         self.times = []
+        self.pts = []
         self.cpu_at_first = None
 
     def probe(self, _pad, info):
-        if info.get_buffer() is not None:
+        buffer = info.get_buffer()
+        if buffer is not None:
             if self.cpu_at_first is None:
                 self.cpu_at_first = process_cpu_seconds()
             self.times.append(time.monotonic())
+            self.pts.append(buffer.pts)
         return Gst.PadProbeReturn.OK
 
     def in_window(self, start, end):
@@ -377,10 +418,10 @@ def bus_error(msg):
     return "unexpected EOS"
 
 
-def run_variant(variant, source, fps, seconds, stream):
+def run_variant(variant, source, fps, seconds, stream, out=None):
     result = Result(variant)
     try:
-        pipeline = build_pipeline(variant, source, fps, stream)
+        pipeline = build_pipeline(variant, source, fps, stream, out=out)
     except GLib.Error as e:
         result.error = f"does not build: {e.message}"
         return result
@@ -446,6 +487,7 @@ def run_variant(variant, source, fps, seconds, stream):
     pipeline.set_state(Gst.State.NULL)
 
     result.source_frames = len(source_count.times)
+    result.missing = missing_frames(source_count.pts, Gst.SECOND / fps)
     result.frames = len(encoded_count.times)
     result.started = result.frames > 0
     result.error = error or ""
