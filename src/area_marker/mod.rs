@@ -16,7 +16,7 @@ use gtk::{gdk, glib};
 
 use self::geometry::Rect;
 use crate::{
-    areas::{MarkedArea, MonitorInfo},
+    areas::{MarkedArea, MonitorInfo, model::ends_within},
     cancelled::Cancelled,
     overlay::OverlayUnavailable,
 };
@@ -142,8 +142,8 @@ fn preload(initial: &MarkedArea, monitors: &[MonitorInfo]) -> Option<(usize, Rec
     let (width, height) = monitors[index].physical_size();
     let fits = initial.x >= 0
         && initial.y >= 0
-        && initial.x + initial.width <= width
-        && initial.y + initial.height <= height;
+        && ends_within(initial.x, initial.width, width)
+        && ends_within(initial.y, initial.height, height);
     fits.then_some((
         index,
         Rect {
@@ -776,6 +776,18 @@ mod tests {
         assert_eq!(preload(&initial, &monitors), None);
 
         let initial = area("DP-3", rect(500, 0, 1280, 720), (1920, 1200), 1.0);
+        assert_eq!(preload(&initial, &monitors), None);
+    }
+
+    #[test]
+    fn no_preload_of_an_area_edited_past_any_size() {
+        let monitors = [edp(), dp3()];
+        let initial = area(
+            "DP-3",
+            rect(i32::MAX - 100, 0, 1280, 720),
+            (1680, 1050),
+            1.05,
+        );
         assert_eq!(preload(&initial, &monitors), None);
     }
 

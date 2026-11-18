@@ -420,6 +420,30 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_area_loads_and_stays_in_place() {
+        let dir = TempDir::new();
+        let path = write(
+            &dir,
+            r#"{
+                "version": 1,
+                "areas": [{
+                    "name": "Edited", "connector": "DP-3",
+                    "x": -2, "y": 80, "width": 1280, "height": 720,
+                    "monitor_width": 1680, "monitor_height": 1050, "scale": 1.05
+                }]
+            }"#,
+        );
+
+        let file = load(&path).unwrap();
+
+        // The area itself is out of date; the file isn't broken.
+        assert_eq!(file.areas.len(), 1);
+        assert_eq!(file.areas[0].area.x, -2);
+        assert!(path.exists());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn save_is_atomic() {
         let dir = TempDir::new();
         let path = write(&dir, "old");

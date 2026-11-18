@@ -1,8 +1,12 @@
 //! Marked areas: a rectangle on one monitor, in physical (video) pixels.
 
+use gettextrs::gettext;
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::gettext_f;
+use crate::{
+    area_marker::geometry::{MIN_HEIGHT, MIN_WIDTH},
+    i18n::gettext_f,
+};
 
 /// How many physical pixels a monitor size may differ by, per axis, and
 /// still be the same size: logical sizes times a fractional scale round
@@ -67,8 +71,13 @@ pub struct MarkedArea {
 
 impl MarkedArea {
     /// Why this area no longer matches its monitor among `monitors`, or
-    /// `None` if it can still be recorded.
+    /// `None` if it can still be recorded. An invalid area, as one edited
+    /// by hand in the file, is never recorded, whatever the monitors.
     pub fn staleness(&self, monitors: &[MonitorInfo]) -> Option<Staleness> {
+        if let Err(reason) = self.validate() {
+            return Some(Staleness::Invalid(reason));
+        }
+
         let Some(monitor) = monitors.iter().find(|m| m.connector == self.connector) else {
             return Some(Staleness::Disconnected);
         };
@@ -89,6 +98,31 @@ impl MarkedArea {
         None
     }
 
+    /// Whether the geometry can be recorded on the monitor it was marked
+    /// on: inside it, even-sized and at least the minimum, with a usable
+    /// scale. The marker never gives anything else; the file may (codex
+    /// code r1 #6, fable code r1 #9).
+    pub fn validate(&self) -> Result<(), InvalidArea> {
+        if self.x < 0 || self.y < 0 {
+            return Err(InvalidArea::NegativePosition);
+        }
+        if self.width < MIN_WIDTH || self.height < MIN_HEIGHT {
+            return Err(InvalidArea::TooSmall);
+        }
+        if self.width % 2 != 0 || self.height % 2 != 0 {
+            return Err(InvalidArea::OddSize);
+        }
+        if !ends_within(self.x, self.width, self.monitor_width)
+            || !ends_within(self.y, self.height, self.monitor_height)
+        {
+            return Err(InvalidArea::OutsideMonitor);
+        }
+        if !(self.scale.is_finite() && self.scale > 0.0) {
+            return Err(InvalidArea::BadScale);
+        }
+        Ok(())
+    }
+
     /// Whether the rectangle, non-empty, lies inside the current physical
     /// size of `monitor`.
     pub fn fits(&self, monitor: &MonitorInfo) -> bool {
@@ -97,8 +131,8 @@ impl MarkedArea {
             && self.y >= 0
             && self.width > 0
             && self.height > 0
-            && self.x + self.width <= monitor_width
-            && self.y + self.height <= monitor_height
+            && ends_within(self.x, self.width, monitor_width)
+            && ends_within(self.y, self.height, monitor_height)
     }
 
     /// A label like `1280×720 on DP-3`.
@@ -112,6 +146,12 @@ impl MarkedArea {
             ],
         )
     }
+}
+
+/// Whether `start + length` is at most `limit`, without overflowing: the
+/// numbers may come from a file edited by hand.
+pub fn ends_within(start: i32, length: i32, limit: i32) -> bool {
+    start.checked_add(length).is_some_and(|end| end <= limit)
 }
 
 /// A marked area with a name, in the saved list.
@@ -130,9 +170,26 @@ pub struct ChosenArea {
     pub area: MarkedArea,
 }
 
+/// What is wrong with the geometry of an area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidArea {
+    /// `x` or `y` is negative.
+    NegativePosition,
+    /// The width or the height is odd.
+    OddSize,
+    /// Under the minimum size of the marker.
+    TooSmall,
+    /// Past the right or the bottom edge of its monitor.
+    OutsideMonitor,
+    /// The scale is not a positive number.
+    BadScale,
+}
+
 /// Why an area can't be recorded any more.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Staleness {
+    /// The geometry itself can't be recorded.
+    Invalid(InvalidArea),
     Disconnected,
     SizeChanged { from: (i32, i32), to: (i32, i32) },
     ScaleChanged { from: f64, to: f64 },
@@ -142,6 +199,7 @@ impl Staleness {
     /// Why an area on `connector` is stale, like `DP-3 is not connected`.
     pub fn describe(&self, connector: &str) -> String {
         match self {
+            Self::Invalid(reason) => reason.describe(connector),
             Self::Disconnected => {
                 gettext_f("{connector} is not connected", &[("connector", connector)])
             }
@@ -160,6 +218,31 @@ impl Staleness {
                     ("from", &from.to_string()),
                     ("to", &to.to_string()),
                 ],
+            ),
+        }
+    }
+}
+
+impl InvalidArea {
+    /// What is wrong, like `the area goes past the edge of DP-3`.
+    pub fn describe(self, connector: &str) -> String {
+        match self {
+            Self::NegativePosition => gettext_f(
+                "the area starts outside {connector}",
+                &[("connector", connector)],
+            ),
+            Self::OddSize => gettext("the area has an odd width or height"),
+            Self::TooSmall => gettext_f(
+                "the area is smaller than {size}",
+                &[("size", &format!("{MIN_WIDTH}×{MIN_HEIGHT}"))],
+            ),
+            Self::OutsideMonitor => gettext_f(
+                "the area goes past the edge of {connector}",
+                &[("connector", connector)],
+            ),
+            Self::BadScale => gettext_f(
+                "the scale of {connector} in the list is not valid",
+                &[("connector", connector)],
             ),
         }
     }
@@ -292,6 +375,177 @@ mod tests {
     }
 
     #[test]
+    fn invalid_comes_before_disconnected() {
+        let area = MarkedArea {
+            x: -2,
+            ..area_on_dp3()
+        };
+        assert_eq!(
+            area.staleness(&[]),
+            Some(Staleness::Invalid(InvalidArea::NegativePosition))
+        );
+    }
+
+    #[test]
+    fn a_negative_position_is_invalid() {
+        for area in [
+            MarkedArea {
+                x: -2,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                y: -1,
+                ..area_on_dp3()
+            },
+        ] {
+            assert_eq!(
+                area.staleness(&[dp3()]),
+                Some(Staleness::Invalid(InvalidArea::NegativePosition)),
+                "{area:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_odd_size_is_invalid() {
+        for area in [
+            MarkedArea {
+                width: 1281,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                height: 721,
+                ..area_on_dp3()
+            },
+        ] {
+            assert_eq!(
+                area.staleness(&[dp3()]),
+                Some(Staleness::Invalid(InvalidArea::OddSize)),
+                "{area:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_under_the_minimum_is_invalid() {
+        for area in [
+            MarkedArea {
+                width: 158,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                height: 118,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                width: 0,
+                height: 0,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                width: -200,
+                ..area_on_dp3()
+            },
+        ] {
+            assert_eq!(
+                area.staleness(&[dp3()]),
+                Some(Staleness::Invalid(InvalidArea::TooSmall)),
+                "{area:?}"
+            );
+        }
+
+        let smallest = MarkedArea {
+            width: 160,
+            height: 120,
+            ..area_on_dp3()
+        };
+        assert_eq!(smallest.staleness(&[dp3()]), None);
+    }
+
+    #[test]
+    fn an_area_past_its_monitor_is_invalid() {
+        for area in [
+            MarkedArea {
+                x: 402,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                y: 332,
+                ..area_on_dp3()
+            },
+            // Overflows i32: checked, not wrapped around.
+            MarkedArea {
+                x: i32::MAX - 100,
+                ..area_on_dp3()
+            },
+            MarkedArea {
+                y: i32::MAX - 100,
+                ..area_on_dp3()
+            },
+        ] {
+            assert_eq!(
+                area.staleness(&[dp3()]),
+                Some(Staleness::Invalid(InvalidArea::OutsideMonitor)),
+                "{area:?}"
+            );
+        }
+
+        // Ends exactly at 1680×1050.
+        let edge = MarkedArea {
+            x: 400,
+            y: 330,
+            ..area_on_dp3()
+        };
+        assert_eq!(edge.staleness(&[dp3()]), None);
+    }
+
+    #[test]
+    fn a_scale_not_positive_and_finite_is_invalid() {
+        for scale in [0.0, -1.05, f64::NAN, f64::INFINITY] {
+            let area = MarkedArea {
+                scale,
+                ..area_on_dp3()
+            };
+            assert_eq!(
+                area.validate(),
+                Err(InvalidArea::BadScale),
+                "scale {scale}"
+            );
+            assert_eq!(
+                area.staleness(&[dp3()]),
+                Some(Staleness::Invalid(InvalidArea::BadScale)),
+                "scale {scale}"
+            );
+        }
+        assert_eq!(area_on_dp3().validate(), Ok(()));
+    }
+
+    #[test]
+    fn invalid_descriptions() {
+        let describe = |reason| Staleness::Invalid(reason).describe("DP-3");
+        assert_eq!(
+            describe(InvalidArea::NegativePosition),
+            "the area starts outside DP-3"
+        );
+        assert_eq!(
+            describe(InvalidArea::OddSize),
+            "the area has an odd width or height"
+        );
+        assert_eq!(
+            describe(InvalidArea::TooSmall),
+            "the area is smaller than 160×120"
+        );
+        assert_eq!(
+            describe(InvalidArea::OutsideMonitor),
+            "the area goes past the edge of DP-3"
+        );
+        assert_eq!(
+            describe(InvalidArea::BadScale),
+            "the scale of DP-3 in the list is not valid"
+        );
+    }
+
+    #[test]
     fn area_description() {
         assert_eq!(area_on_dp3().describe(), "1280×720 on DP-3");
     }
@@ -366,6 +620,15 @@ mod tests {
             ..area_on_dp3()
         };
         assert!(!empty.fits(&dp3()));
+    }
+
+    #[test]
+    fn does_not_fit_when_the_end_overflows() {
+        let area = MarkedArea {
+            x: i32::MAX - 100,
+            ..area_on_dp3()
+        };
+        assert!(!area.fits(&dp3()));
     }
 
     #[test]

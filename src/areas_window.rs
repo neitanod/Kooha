@@ -533,6 +533,19 @@ mod tests {
         assert!(row.can_mark_again);
     }
 
+    #[test]
+    fn invalid_row_says_why_and_can_be_marked_again() {
+        let mut edited = saved("Edited");
+        edited.area.x = -2;
+
+        let row = row_model(&edited, false, &[dp3()]);
+
+        assert_eq!(row.subtitle, "the area starts outside DP-3");
+        assert!(row.stale);
+        assert!(!row.can_choose);
+        assert!(row.can_mark_again);
+    }
+
     /// The actions `mark-area` and `remark-area` of a fake `win` group on
     /// `widget`, recording each activation with its parameter.
     fn fake_mark_actions(
