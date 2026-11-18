@@ -18,11 +18,11 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kooha\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-05 14:41+0800\n"
+"POT-Creation-Date: 2026-11-18 03:24-0300\n"
 "PO-Revision-Date: 2026-11-06 08:51+0000\n"
 "Last-Translator: Adolfo Jayme Barrientos <fito@libreoffice.org>\n"
-"Language-Team: Spanish <https://hosted.weblate.org/projects/seadve/kooha/es/>"
-"\n"
+"Language-Team: Spanish <https://hosted.weblate.org/projects/seadve/kooha/es/"
+">\n"
 "Language: es\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -32,7 +32,7 @@ msgstr ""
 
 #: data/io.github.seadve.Kooha.desktop.in.in:2
 #: data/io.github.seadve.Kooha.metainfo.xml.in.in:7 src/about.rs:24
-#: src/main.rs:61 src/tray/model.rs:157 src/tray/service.rs:72
+#: src/main.rs:75 src/tray/model.rs:278 src/tray/service.rs:114
 msgid "Kooha"
 msgstr "Kooha"
 
@@ -104,12 +104,13 @@ msgstr "Cuenta atrás para iniciar la grabación y botón para cancelarla"
 msgid "Select Area"
 msgstr "Seleccionar área"
 
-#: data/resources/ui/area_selector.ui:20 data/resources/ui/window.ui:235
-#: data/resources/ui/window.ui:278 src/window/mod.rs:213
+#: data/resources/ui/area_selector.ui:20 data/resources/ui/window.ui:309
+#: data/resources/ui/window.ui:352 src/areas_window.rs:377
+#: src/window/mod.rs:502
 msgid "Cancel"
 msgstr "Cancelar"
 
-#: data/resources/ui/area_selector.ui:26
+#: data/resources/ui/area_selector.ui:26 src/area_marker/save_dialog.rs:121
 msgid "Done"
 msgstr "Hecho"
 
@@ -117,9 +118,41 @@ msgstr "Hecho"
 msgid "Reset Selection"
 msgstr "Restablecer selección"
 
+#: data/resources/ui/areas_window.ui:4
+msgid "Areas"
+msgstr "Áreas"
+
+#: data/resources/ui/areas_window.ui:23
+msgid "No Saved Areas"
+msgstr "No hay áreas guardadas"
+
+#: data/resources/ui/areas_window.ui:24
+msgid "Mark an area and save it with a name to see it here."
+msgstr "Marque un área y guárdela con un nombre para verla aquí."
+
+#: data/resources/ui/areas_window.ui:28 data/resources/ui/window.ui:111
+msgid "Mark Area"
+msgstr "Marcar área"
+
 #: data/resources/ui/preferences_dialog.ui:10
 msgid "General"
 msgstr "General"
+
+#: data/resources/ui/preferences_dialog.ui:13
+msgid "Delay (Seconds)"
+msgstr "Demora (segundos)"
+
+#: data/resources/ui/preferences_dialog.ui:14
+msgid "Time interval before recording begins"
+msgstr "Intervalo de tiempo antes de que comience la grabación"
+
+#: data/resources/ui/preferences_dialog.ui:27 src/doctor/checks.rs:550
+msgid "Recordings Folder"
+msgstr "Carpeta de grabaciones"
+
+#: data/resources/ui/preferences_dialog.ui:28
+msgid "Destination folder for the recordings"
+msgstr "Carpeta de destino de las grabaciones"
 
 #: data/resources/ui/preferences_dialog.ui:50
 msgctxt "preferences group"
@@ -134,79 +167,71 @@ msgstr "Destello al reanudar"
 msgid "Mark each resume with a short fade"
 msgstr "Marca cada reanudación con un breve fundido"
 
-#: data/resources/ui/preferences_dialog.ui
+#: data/resources/ui/preferences_dialog.ui:59
 msgid "Flash Color"
 msgstr "Color del destello"
 
-#: data/resources/ui/preferences_dialog.ui
+#: data/resources/ui/preferences_dialog.ui:63
 msgid "White"
 msgstr "Blanco"
 
-#: data/resources/ui/preferences_dialog.ui
+#: data/resources/ui/preferences_dialog.ui:64
 msgid "Black"
 msgstr "Negro"
 
-#: data/resources/ui/preferences_dialog.ui:13
-msgid "Delay (Seconds)"
-msgstr "Demora (segundos)"
-
-#: data/resources/ui/preferences_dialog.ui:14
-msgid "Time interval before recording begins"
-msgstr "Intervalo de tiempo antes de que comience la grabación"
-
-#: data/resources/ui/preferences_dialog.ui:27 src/doctor/checks.rs
-msgid "Recordings Folder"
-msgstr "Carpeta de grabaciones"
-
-#: data/resources/ui/preferences_dialog.ui:28
-msgid "Destination folder for the recordings"
-msgstr "Carpeta de destino de las grabaciones"
-
-#: data/resources/ui/preferences_dialog.ui:65
+#: data/resources/ui/preferences_dialog.ui:78
 msgid "Overlays unavailable"
 msgstr "Capas no disponibles"
 
-#: data/resources/ui/preferences_dialog.ui:79
+#: data/resources/ui/preferences_dialog.ui:90
 msgid "Open Report"
 msgstr "Abrir reporte"
 
-#: data/resources/ui/preferences_dialog.ui:86 src/window/mod.rs:774
+#: data/resources/ui/preferences_dialog.ui:97 src/window/mod.rs:1384
 msgid "Show Camera"
 msgstr "Mostrar cámara"
 
-#: data/resources/ui/preferences_dialog.ui:91 src/window/mod.rs:788
+#: data/resources/ui/preferences_dialog.ui:102 src/window/mod.rs:1395
 msgid "Camera Source"
 msgstr "Fuente de la cámara"
 
-#: data/resources/ui/preferences_dialog.ui:96
+#: data/resources/ui/preferences_dialog.ui:108
+msgid "Keep Camera Frame Rate"
+msgstr "Mantener la tasa de fotogramas de la cámara"
+
+#: data/resources/ui/preferences_dialog.ui:113
 msgid "Camera Shape"
 msgstr "Forma de la cámara"
 
-#: data/resources/ui/preferences_dialog.ui:97
+#: data/resources/ui/preferences_dialog.ui:114
 msgid "Right-click the camera to switch"
 msgstr "Clic derecho sobre la cámara para cambiarla"
 
-#: data/resources/ui/preferences_dialog.ui:101
+#: data/resources/ui/preferences_dialog.ui:118
 msgid "Circle"
 msgstr "Círculo"
 
-#: data/resources/ui/preferences_dialog.ui:102
+#: data/resources/ui/preferences_dialog.ui:119
 msgid "Rounded Rectangle"
 msgstr "Rectángulo redondeado"
 
-#: data/resources/ui/preferences_dialog.ui:110
+#: data/resources/ui/preferences_dialog.ui:127
 msgid "Camera Monitor"
 msgstr "Monitor de la cámara"
 
-#: data/resources/ui/preferences_dialog.ui:50
+#: data/resources/ui/preferences_dialog.ui:134
 msgid "Video"
 msgstr "Vídeo"
 
-#: data/resources/ui/preferences_dialog.ui:53
+#: data/resources/ui/preferences_dialog.ui:137
 msgid "Format"
 msgstr "Formato"
 
-#: data/resources/ui/preferences_dialog.ui:58
+#: data/resources/ui/preferences_dialog.ui:143
+msgid "Encoder"
+msgstr "Codificador"
+
+#: data/resources/ui/preferences_dialog.ui:148
 msgid "Frame Rate"
 msgstr "Tasa de fotogramas"
 
@@ -280,91 +305,124 @@ msgctxt "shortcut window"
 msgid "Toggle Pointer"
 msgstr "Activar o desactivar puntero"
 
-#: data/resources/ui/window.ui:26
+#: data/resources/ui/shortcuts.ui:85
+msgctxt "shortcut window"
+msgid "Toggle Area Border"
+msgstr "Alternar borde del área"
+
+#: data/resources/ui/window.ui:28
 msgid "Main Menu"
 msgstr "Menú principal"
 
-#: data/resources/ui/window.ui:55
+#: data/resources/ui/window.ui:57
 msgid "Capture a Monitor or Window"
 msgstr "Capturar un monitor o una ventana"
 
-#: data/resources/ui/window.ui:68
+#: data/resources/ui/window.ui:70
 msgid "Capture a Selection of Screen"
 msgstr "Capturar una selección de la pantalla"
 
-#: data/resources/ui/window.ui:88
+#: data/resources/ui/window.ui:91
+msgid "Area to Record"
+msgstr "Área a grabar"
+
+#: data/resources/ui/window.ui:99 src/tray/model.rs:214
+msgid "Show Area Border"
+msgstr "Mostrar borde del área"
+
+#: data/resources/ui/window.ui:100
+msgid "Hide Area Border"
+msgstr "Ocultar borde del área"
+
+#: data/resources/ui/window.ui:112
+msgid "Mark a New Area on the Screen"
+msgstr "Marcar un área nueva en la pantalla"
+
+#: data/resources/ui/window.ui:118
+msgid "Areas…"
+msgstr "Áreas…"
+
+#: data/resources/ui/window.ui:119
+msgid "Manage the Saved Areas"
+msgstr "Administrar las áreas guardadas"
+
+#: data/resources/ui/window.ui:136
 msgid "Enable Desktop Audio"
 msgstr "Activar audio del escritorio"
 
-#: data/resources/ui/window.ui:89
+#: data/resources/ui/window.ui:137
 msgid "Disable Desktop Audio"
 msgstr "Desactivar audio del escritorio"
 
-#: data/resources/ui/window.ui:97
+#: data/resources/ui/window.ui:145
 msgid "Enable Microphone"
 msgstr "Activar micrófono"
 
-#: data/resources/ui/window.ui:98
+#: data/resources/ui/window.ui:146
 msgid "Disable Microphone"
 msgstr "Desactivar micrófono"
 
-#: data/resources/ui/window.ui:106 src/tray/model.rs:122
+#: data/resources/ui/window.ui:154 src/tray/model.rs:198
 msgid "Show Pointer"
 msgstr "Mostrar puntero"
 
-#: data/resources/ui/window.ui:107
+#: data/resources/ui/window.ui:155
 msgid "Hide Pointer"
 msgstr "Ocultar puntero"
 
-#: data/resources/ui/window.ui:113 src/tray/model.rs:133
+#: data/resources/ui/window.ui:161 src/tray/model.rs:205
 msgid "Camera"
 msgstr "Cámara"
 
-#: data/resources/ui/window.ui:117 src/tray/model.rs:83
+#: data/resources/ui/window.ui:171 src/tray/model.rs:159
 msgid "Start Recording"
 msgstr "Iniciar grabación"
 
-#: data/resources/ui/window.ui:118
+#: data/resources/ui/window.ui:172
 msgid "Record"
 msgstr "Grabar"
 
-#: data/resources/ui/window.ui:131
+#: data/resources/ui/window.ui:185
 msgid "Forget Previously Selected Video Sources"
 msgstr "Olvidar fuentes de vídeo anteriormente seleccionadas"
 
-#: data/resources/ui/window.ui:182 src/tray/model.rs:85
+#: data/resources/ui/window.ui:247 src/tray/model.rs:161
 msgid "Stop Recording"
 msgstr "Detener grabación"
 
-#: data/resources/ui/window.ui:183
+#: data/resources/ui/window.ui:248
 msgid "Stop"
 msgstr "Detener"
 
-#: data/resources/ui/window.ui:193
+#: data/resources/ui/window.ui:257
 msgid "Pause Recording"
 msgstr "Pausar grabación"
 
-#: data/resources/ui/window.ui:216
+#: data/resources/ui/window.ui:280
 msgid "Recording in…"
 msgstr "Grabando en…"
 
-#: data/resources/ui/window.ui:234 data/resources/ui/window.ui:277
+#: data/resources/ui/window.ui:308 data/resources/ui/window.ui:351
 msgid "Cancel Recording"
 msgstr "Cancelar grabación"
 
-#: data/resources/ui/window.ui:259
+#: data/resources/ui/window.ui:333
 msgid "Flushing…"
 msgstr "Purgando…"
 
-#: data/resources/ui/window.ui:295
+#: data/resources/ui/window.ui:371
 msgid "_Preferences"
 msgstr "_Preferencias"
 
-#: data/resources/ui/window.ui:299
+#: data/resources/ui/window.ui:375
+msgid "_Requirements Report"
+msgstr "_Reporte de requisitos"
+
+#: data/resources/ui/window.ui:379
 msgid "_Keyboard Shortcuts"
 msgstr "Atajos de _teclado"
 
-#: data/resources/ui/window.ui:303
+#: data/resources/ui/window.ui:383
 msgid "_About Kooha"
 msgstr "_Acerca de Kooha"
 
@@ -389,37 +447,142 @@ msgid "Translate"
 msgstr "Traducir"
 
 #. Translators: This is a message that the user will see when the recording is finished.
-#: src/application.rs:137
+#: src/application.rs:202
 msgid "Screencast recorded"
 msgstr "Grabación de pantalla finalizada"
 
-#: src/application.rs:144
+#: src/application.rs:209
 msgid "Show in Files"
 msgstr "Mostrar en Archivos"
 
-#: src/application.rs:158
+#: src/application.rs:230
 msgid "Recording started"
 msgstr "Grabación iniciada"
 
-#: src/camera_pip/caps.rs
+#: src/area_marker/save_dialog.rs:115
+msgid "Top left at {x}, {y}"
+msgstr "Esquina superior izquierda en {x}, {y}"
+
+#: src/area_marker/save_dialog.rs:120 src/areas_window.rs:299
+#: src/window/mod.rs:877
+msgid "Mark Again"
+msgstr "Volver a marcar"
+
+#: src/area_marker/save_dialog.rs:128
+msgid "Save as…"
+msgstr "Guardar como…"
+
+#: src/area_marker/save_dialog.rs:145 src/areas_window.rs:99
+msgid "There is already an area called “{name}”"
+msgstr "Ya hay un área llamada «{name}»"
+
+#: src/area_marker/save_dialog.rs:149
+msgid "Replace it with this one, {area}?"
+msgstr "¿Reemplazarla por esta, {area}?"
+
+#: src/area_marker/save_dialog.rs:154
+msgid "Change Name"
+msgstr "Cambiar nombre"
+
+#: src/area_marker/save_dialog.rs:155
+msgid "Replace"
+msgstr "Reemplazar"
+
+#: src/area_marker/view.rs:99
+msgid "Size"
+msgstr "Tamaño"
+
+#: src/area_marker/view.rs:110
+msgid "Drag to mark · Enter confirms · Esc cancels"
+msgstr "Arrastre para marcar · Enter confirma · Esc cancela"
+
+#: src/areas/model.rs:141
+msgid "{width}×{height} on {connector}"
+msgstr "{width}×{height} en {connector}"
+
+#: src/areas/model.rs:210
+msgid "{connector} is not connected"
+msgstr "{connector} no está conectado"
+
+#: src/areas/model.rs:213
+msgid "{connector} changed from {from} to {to}"
+msgstr "{connector} cambió de {from} a {to}"
+
+#: src/areas/model.rs:221
+msgid "{connector} changed scale from {from} to {to}"
+msgstr "{connector} cambió la escala de {from} a {to}"
+
+#: src/areas/model.rs:237
+msgid "the area starts outside {connector}"
+msgstr "el área empieza fuera de {connector}"
+
+#: src/areas/model.rs:240
+msgid "the area has an odd width or height"
+msgstr "el área tiene un ancho o un alto impar"
+
+#: src/areas/model.rs:242
+msgid "the area is smaller than {size}"
+msgstr "el área es más pequeña que {size}"
+
+#: src/areas/model.rs:246
+msgid "the area goes past the edge of {connector}"
+msgstr "el área se sale del borde de {connector}"
+
+#: src/areas/model.rs:250
+msgid "the scale of {connector} in the list is not valid"
+msgstr "la escala de {connector} en la lista no es válida"
+
+#: src/areas/store.rs:442 src/areas/store.rs:491
+msgid "The areas weren’t saved: {error}"
+msgstr "No se guardaron las áreas: {error}"
+
+#: src/areas/store.rs:485
+msgid "The areas weren’t saved: {path} can’t be written"
+msgstr "No se guardaron las áreas: no se puede escribir en {path}"
+
+#: src/areas_window.rs:64
+msgid "{area} · chosen"
+msgstr "{area} · elegida"
+
+#: src/areas_window.rs:175
+msgid "Saved in {path}"
+msgstr "Guardadas en {path}"
+
+#: src/areas_window.rs:274
+msgid "Choose"
+msgstr "Elegir"
+
+#: src/areas_window.rs:287
+msgid "Rename"
+msgstr "Renombrar"
+
+#: src/areas_window.rs:310 src/areas_window.rs:378
+msgid "Delete"
+msgstr "Eliminar"
+
+#: src/areas_window.rs:373
+msgid "Delete “{name}”?"
+msgstr "¿Eliminar «{name}»?"
+
+#: src/areas_window.rs:374
+msgid "The area is removed from the list."
+msgstr "El área se quita de la lista."
+
+#: src/camera_pip/caps.rs:96
 msgid "No camera found"
 msgstr "No se encontró ninguna cámara"
 
-#: src/camera_pip/caps.rs
+#: src/camera_pip/caps.rs:97
 msgid "Camera disconnected"
 msgstr "La cámara se desconectó"
 
-#: src/camera_pip/caps.rs
+#: src/camera_pip/caps.rs:98
 msgid "Could not open the camera"
 msgstr "No se pudo abrir la cámara"
 
-#: src/camera_pip/caps.rs
+#: src/camera_pip/caps.rs:99
 msgid "Camera format not supported"
 msgstr "La cámara usa un formato no compatible"
-
-#: src/preferences_dialog.rs
-msgid "Disconnected Camera"
-msgstr "Cámara desconectada"
 
 #: src/capture_warnings.rs:39
 msgid "Without audio"
@@ -445,6 +608,218 @@ msgstr "No se pudo encontrar el dispositivo de audio predeterminado"
 msgid "Make sure that you have PulseAudio installed in your system."
 msgstr "Cerciórese de que tiene instalado PulseAudio en el sistema."
 
+#: src/doctor/checks.rs:167
+msgid "GStreamer Elements"
+msgstr "Elementos de GStreamer"
+
+#: src/doctor/checks.rs:195
+msgid "Missing GStreamer elements: {elements}."
+msgstr "Faltan elementos de GStreamer: {elements}."
+
+#: src/doctor/checks.rs:207
+msgid "Unknown package for {element}."
+msgstr "Se desconoce el paquete de {element}."
+
+#: src/doctor/checks.rs:225
+msgid "Recording does not work."
+msgstr "No se puede grabar."
+
+#: src/doctor/checks.rs:239
+msgid "These formats cannot be used: {formats}."
+msgstr "No se pueden usar estos formatos: {formats}."
+
+#: src/doctor/checks.rs:248
+msgid "The camera overlay may not be able to show the camera."
+msgstr "Puede que no se pueda mostrar la cámara en pantalla."
+
+#: src/doctor/checks.rs:259
+msgid "Reinstall Kooha: it includes {elements}."
+msgstr "Reinstale Kooha: incluye {elements}."
+
+#: src/doctor/checks.rs:290
+msgid "Hardware Video Encoders"
+msgstr "Codificadores de video por hardware"
+
+#: src/doctor/checks.rs:341
+msgid ""
+"MP4 and Matroska cannot use these encoders: {encoders}. Automatic uses the "
+"next one, down to the CPU."
+msgstr ""
+"MP4 y Matroska no pueden usar estos codificadores: {encoders}. Automático "
+"usa el siguiente, hasta llegar a la CPU."
+
+#: src/doctor/checks.rs:348
+msgid "Check the graphics driver for {encoders}."
+msgstr "Revise el controlador gráfico de {encoders}."
+
+#: src/doctor/checks.rs:357
+msgid "Screen Capture Portal"
+msgstr "Portal de captura de pantalla"
+
+#: src/doctor/checks.rs:371
+msgid "none"
+msgstr "ninguno"
+
+#: src/doctor/checks.rs:377
+msgid "Version {version} · pointer: {modes}"
+msgstr "Versión {version} · puntero: {modes}"
+
+#: src/doctor/checks.rs:393
+msgid "The screen capture portal does not respond."
+msgstr "El portal de captura de pantalla no responde."
+
+#: src/doctor/checks.rs:394 src/doctor/checks.rs:416
+msgid "Nothing can be recorded."
+msgstr "No se puede grabar nada."
+
+#: src/doctor/checks.rs:406
+msgid "PipeWire"
+msgstr "PipeWire"
+
+#: src/doctor/checks.rs:410
+msgid "Version {version}"
+msgstr "Versión {version}"
+
+#: src/doctor/checks.rs:415
+msgid "PipeWire is not running."
+msgstr "PipeWire no está en ejecución."
+
+#: src/doctor/checks.rs:428
+msgid "Audio Devices"
+msgstr "Dispositivos de audio"
+
+#: src/doctor/checks.rs:437
+msgid "There is no default output device."
+msgstr "No hay un dispositivo de salida predeterminado."
+
+#: src/doctor/checks.rs:438
+msgid "Desktop audio cannot be recorded."
+msgstr "No se puede grabar el audio del escritorio."
+
+#: src/doctor/checks.rs:441
+msgid "There is no default microphone."
+msgstr "No hay un micrófono predeterminado."
+
+#: src/doctor/checks.rs:442
+msgid "The microphone cannot be recorded."
+msgstr "No se puede grabar el micrófono."
+
+#: src/doctor/checks.rs:450
+msgid "Connect the device and choose it as the default in the sound settings."
+msgstr ""
+"Conecte el dispositivo y elíjalo como predeterminado en la configuración de "
+"sonido."
+
+#: src/doctor/checks.rs:457
+msgid "Cameras"
+msgstr "Cámaras"
+
+#: src/doctor/checks.rs:462
+msgid "{count} camera"
+msgid_plural "{count} cameras"
+msgstr[0] "{count} cámara"
+msgstr[1] "{count} cámaras"
+
+#: src/doctor/checks.rs:472
+msgid "No camera was found."
+msgstr "No se encontró ninguna cámara."
+
+#: src/doctor/checks.rs:473
+msgid "The camera overlay cannot be shown."
+msgstr "No se puede mostrar la cámara en pantalla."
+
+#: src/doctor/checks.rs:481
+msgid "Screen Overlays"
+msgstr "Capas en pantalla"
+
+#: src/doctor/checks.rs:482
+msgid "The camera overlay and the area border cannot be shown."
+msgstr "No se pueden mostrar la cámara en pantalla ni el borde del área."
+
+#: src/doctor/checks.rs:489 src/preferences_dialog.rs:974
+msgid "Kooha was built without gtk4-layer-shell."
+msgstr "Kooha se compiló sin gtk4-layer-shell."
+
+#: src/doctor/checks.rs:492
+msgid "Then rebuild Kooha."
+msgstr "Después vuelva a compilar Kooha."
+
+#: src/doctor/checks.rs:499
+msgid "Your desktop does not support screen overlays (wlr-layer-shell)."
+msgstr "Su escritorio no admite capas en pantalla (wlr-layer-shell)."
+
+#: src/doctor/checks.rs:509
+msgid "Could not ask the desktop without a display."
+msgstr "No se pudo consultar al escritorio sin una pantalla."
+
+#: src/doctor/checks.rs:521
+msgid "Tray Icon"
+msgstr "Ícono de bandeja"
+
+#: src/doctor/checks.rs:531
+msgid "Then enable the AppIndicator extension and log in again."
+msgstr "Después active la extensión AppIndicator y vuelva a iniciar sesión."
+
+#: src/doctor/checks.rs:537
+msgid "Add a system tray to your desktop panel."
+msgstr "Agregue una bandeja del sistema al panel del escritorio."
+
+#: src/doctor/checks.rs:541
+msgid "No system tray is available (org.kde.StatusNotifierWatcher)."
+msgstr ""
+"No hay una bandeja del sistema disponible (org.kde.StatusNotifierWatcher)."
+
+#: src/doctor/checks.rs:542
+msgid "The tray icon is not shown."
+msgstr "No se muestra el ícono de bandeja."
+
+#: src/doctor/checks.rs:555
+msgid "The recordings folder does not exist."
+msgstr "La carpeta de grabaciones no existe."
+
+#: src/doctor/checks.rs:556 src/doctor/checks.rs:563
+msgid "Recordings cannot be saved."
+msgstr "No se pueden guardar las grabaciones."
+
+#: src/doctor/checks.rs:562
+msgid "The recordings folder is not writable."
+msgstr "No se puede escribir en la carpeta de grabaciones."
+
+#: src/doctor/checks.rs:566
+msgid ""
+"Check the owner and the permissions of the folder, or choose another one in "
+"Preferences."
+msgstr ""
+"Revise el dueño y los permisos de la carpeta, o elija otra en Preferencias."
+
+#: src/doctor/dialog.rs:88
+msgid "Requirements Report"
+msgstr "Reporte de requisitos"
+
+#: src/doctor/dialog.rs:121
+msgid "Copy Report"
+msgstr "Copiar reporte"
+
+#: src/doctor/dialog.rs:135 src/doctor/dialog.rs:235 src/window/mod.rs:556
+msgid "Copied to clipboard"
+msgstr "Se copió en el portapapeles"
+
+#: src/doctor/dialog.rs:208 src/doctor/mod.rs:95
+msgid "Problem"
+msgstr "Problema"
+
+#: src/doctor/dialog.rs:210 src/doctor/mod.rs:100
+msgid "What stops working"
+msgstr "Qué deja de funcionar"
+
+#: src/doctor/dialog.rs:217 src/doctor/mod.rs:105 src/doctor/mod.rs:111
+msgid "How to fix it"
+msgstr "Cómo arreglarlo"
+
+#: src/doctor/dialog.rs:229 src/window/mod.rs:551
+msgid "Copy to clipboard"
+msgstr "Copiar en el portapapeles"
+
 #. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
 #: src/format.rs:36
 msgid "{time} hour"
@@ -466,123 +841,225 @@ msgid_plural "{time} seconds"
 msgstr[0] "{time} segundo"
 msgstr[1] "{time} segundos"
 
-#: src/preferences_dialog.rs:76
+#: src/main.rs:95
+msgid "Print the requirements report and exit"
+msgstr "Imprime el reporte de requisitos y sale"
+
+#: src/preferences_dialog.rs:149
 msgid "Failed to set recordings folder"
 msgstr "No se pudo configurar la carpeta de grabaciones"
 
-#: src/preferences_dialog.rs:233
+#: src/preferences_dialog.rs:275 src/preferences_dialog.rs:938
 msgid "Automatic"
 msgstr "Automático"
 
-#: src/preferences_dialog.rs:311
+#: src/preferences_dialog.rs:381
 msgid "Camera & Overlays"
 msgstr "Cámara y capas"
 
-#: src/preferences_dialog.rs:236
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/preferences_dialog.rs:573
+msgid "Automatic uses {encoder}"
+msgstr "Automático usa {encoder}"
+
+#: src/preferences_dialog.rs:576
+msgid "No encoder is working"
+msgstr "Ningún codificador funciona"
+
+#: src/preferences_dialog.rs:697
 msgid "This frame rate may cause performance issues on the selected format."
 msgstr ""
 "Esta tasa de fotogramas puede causar problemas de desempeño en el formato "
 "seleccionado."
 
-#: src/preferences_dialog.rs:300
+#: src/preferences_dialog.rs:761
 msgid "This format is experimental and unsupported."
 msgstr "Este formato es experimental y no está respaldado."
 
-#: src/preferences_dialog.rs:307 src/window/mod.rs:557
+#: src/preferences_dialog.rs:768 src/window/mod.rs:1117
 msgid "None"
 msgstr "Ninguno"
 
-#: src/preferences_dialog.rs:681 src/doctor/checks.rs
-msgid "Kooha was built without gtk4-layer-shell."
-msgstr "Kooha se compiló sin gtk4-layer-shell."
+#: src/preferences_dialog.rs:907
+msgid "In low light the picture gets darker instead of choppy"
+msgstr "Con poca luz la imagen se oscurece en lugar de entrecortarse"
 
-#: src/preferences_dialog.rs:683
+#: src/preferences_dialog.rs:909
+msgid "This camera can't change it"
+msgstr "Esta cámara no permite cambiarla"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/preferences_dialog.rs:942
+msgid "{encoder} ({element} is not installed)"
+msgstr "{encoder} ({element} no está instalado)"
+
+#: src/preferences_dialog.rs:976
 msgid "Your desktop does not support screen overlays."
 msgstr "Su escritorio no admite capas sobre la pantalla."
 
-#: src/recording.rs:42
+#: src/preferences_dialog.rs:1019
+msgid "Disconnected Camera"
+msgstr "Cámara desconectada"
+
+#: src/recording.rs:52
 msgid "No active profile"
 msgstr "Ningún perfil activo"
 
-#: src/recording.rs:187 src/recording.rs:226 src/recording.rs:276
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/recording.rs:142
+msgid "The {encoder} encoder is not working"
+msgstr "El codificador {encoder} no funciona"
+
+#: src/recording.rs:145
+msgid "Choose Automatic or CPU in Preferences."
+msgstr "Elija Automático o CPU en Preferencias."
+
+#: src/recording.rs:214
+msgid "The area “{name}” is out of date"
+msgstr "El área «{name}» está desactualizada"
+
+#: src/recording.rs:217
+msgid "The last area is out of date"
+msgstr "La última área está desactualizada"
+
+#: src/recording.rs:240
+msgid "You shared {shared}, but the area is on {connector} ({monitor})"
+msgstr "Compartió {shared}, pero el área está en {connector} ({monitor})"
+
+#: src/recording.rs:248
+msgid ""
+"You shared more than one screen, but the area is on {connector} ({monitor})"
+msgstr ""
+"Compartió más de una pantalla, pero el área está en {connector} ({monitor})"
+
+#: src/recording.rs:358
+msgid "Choose {connector} (whole screen) in the sharing dialog"
+msgstr "Elija {connector} (pantalla completa) en el diálogo para compartir"
+
+#: src/recording.rs:679 src/recording.rs:748 src/recording.rs:1139
 msgid "Failed to start recording"
 msgstr "No se pudo iniciar la grabación"
 
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/recording.rs:190
-msgid "Check out {link} for help."
-msgstr "Consulte {link} para obtener ayuda."
-
-#: src/recording.rs:227
+#: src/recording.rs:680
 msgid "A GStreamer plugin may not be installed."
 msgstr "Es posible que no se haya instalado un complemento de GStreamer."
 
-#: src/recording.rs:316
+#: src/recording.rs:692
 msgid "The camera overlay did not refresh in time"
 msgstr "La cámara en pantalla no se actualizó a tiempo"
 
-#: src/recording.rs:277 src/recording.rs:506
+#: src/recording.rs:749 src/recording.rs:1029
 msgid "Make sure that the saving location exists and is accessible."
 msgstr "Asegúrese de que la ubicación de guardado exista y sea accesible."
 
-#: src/recording.rs:497
+#: src/recording.rs:1018
 msgid "An error occurred while recording"
 msgstr "Se produjo un error al grabar"
 
 #. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/recording.rs:503
+#: src/recording.rs:1026
 msgid "Failed to open “{path}” for writing"
 msgstr "No se pudo abrir «{path}» para escritura"
+
+#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+#: src/recording.rs:1142
+msgid "Check out {link} for help."
+msgstr "Consulte {link} para obtener ayuda."
 
 #: src/settings.rs:43
 msgid "Select Recordings Folder"
 msgstr "Elegir carpeta de grabaciones"
 
-#: src/tray/model.rs:96
+#: src/tray/model.rs:116
+msgid "{name} · {area}"
+msgstr "{name} · {area}"
+
+#: src/tray/model.rs:134
+msgid "Last area"
+msgstr "Última área"
+
+#: src/tray/model.rs:172
 msgid "Resume"
 msgstr "Reanudar"
 
-#: src/tray/model.rs:98
+#: src/tray/model.rs:174
 msgid "Pause"
 msgstr "Pausar"
 
-#: src/tray/model.rs:110
+#: src/tray/model.rs:186
 msgid "Record Desktop Audio"
 msgstr "Grabar audio del escritorio"
 
-#: src/tray/model.rs:116
+#: src/tray/model.rs:192
 msgid "Record Microphone"
 msgstr "Grabar micrófono"
 
-#: src/tray/model.rs:130
+#: src/tray/model.rs:223
 msgid "Show Window"
 msgstr "Mostrar ventana"
 
-#: src/tray/model.rs:162
+#: src/tray/model.rs:228 src/window/mod.rs:504
+msgid "Quit"
+msgstr "Salir"
+
+#: src/tray/model.rs:253
+msgid "Mark New Area…"
+msgstr "Marcar un área nueva…"
+
+#: src/tray/model.rs:259
+msgid "Area"
+msgstr "Área"
+
+#: src/tray/model.rs:283
 msgid "Ready"
 msgstr "Listo"
 
-#: src/tray/model.rs:163
+#: src/tray/model.rs:284
 msgid "Starting…"
 msgstr "Empezando…"
 
-#: src/tray/model.rs:165
+#: src/tray/model.rs:286
 msgid "Recording — {time}"
 msgstr "Grabando — {time}"
 
-#: src/tray/model.rs:168
+#: src/tray/model.rs:289
 msgid "Paused — {time}"
 msgstr "En pausa — {time}"
 
-#: src/tray/model.rs:170
+#: src/tray/model.rs:291
 msgid "Saving…"
 msgstr "Guardando…"
 
-#: src/window/mod.rs:78
+#: src/window/area_row.rs:36
+msgid "Last area · {area}"
+msgstr "Última área · {area}"
+
+#: src/window/area_row.rs:115
+msgid "The list of areas was unreadable; it was moved to {path}"
+msgstr "No se pudo leer la lista de áreas; se movió a {path}"
+
+#: src/window/area_row.rs:119
+msgid "Couldn't read the list of areas: {error}"
+msgstr "No se pudo leer la lista de áreas: {error}"
+
+#: src/window/area_row.rs:123
+msgid "The list of areas was written by a newer Kooha; changes won't be saved"
+msgstr ""
+"La lista de áreas la escribió un Kooha más nuevo; los cambios no se guardarán"
+
+#: src/window/area_row.rs:126
+msgid ""
+"The list of areas is unreadable and in use by another Kooha; changes won't "
+"be saved"
+msgstr ""
+"La lista de áreas no se puede leer y otro Kooha la está usando; los cambios "
+"no se guardarán"
+
+#: src/window/mod.rs:193
 msgid "Failed to toggle pause"
 msgstr "No se pudo conmutar la pausa"
 
-#: src/window/mod.rs:199
+#: src/window/mod.rs:488
 msgid ""
 "A recording is currently in progress. Quitting immediately may cause the "
 "recording to be unplayable. Please stop the recording before quitting."
@@ -590,7 +1067,7 @@ msgstr ""
 "Hay una grabación en curso. Salir inmediatamente puede hacer que la "
 "grabación no se pueda reproducir. Detenga la grabación antes de salir."
 
-#: src/window/mod.rs:202
+#: src/window/mod.rs:491
 msgid ""
 "Quitting will cancel the processing and may cause the recording to be "
 "unplayable."
@@ -598,39 +1075,31 @@ msgstr ""
 "Al salir se cancelará el procesamiento y puede que la grabación no se pueda "
 "reproducir."
 
-#: src/window/mod.rs:208
+#: src/window/mod.rs:497
 msgid "Quit the Application?"
 msgstr "¿Quiere salir de la aplicación?"
 
-#: src/tray/model.rs:135 src/window/mod.rs:215
-msgid "Quit"
-msgstr "Salir"
-
-#: src/window/mod.rs:256 src/doctor/dialog.rs
-msgid "Copy to clipboard"
-msgstr "Copiar en el portapapeles"
-
-#: src/window/mod.rs:261 src/doctor/dialog.rs
-msgid "Copied to clipboard"
-msgstr "Se copió en el portapapeles"
-
-#: src/window/mod.rs:267
+#: src/window/mod.rs:562
 msgid "Show detailed error"
 msgstr "Mostrar error detallado"
 
-#: src/window/mod.rs:289
+#: src/window/mod.rs:584
 msgid "Help"
 msgstr "Ayuda"
 
-#: src/window/mod.rs:294
+#: src/window/mod.rs:589
+msgid "Open Requirements Report"
+msgstr "Abrir el reporte de requisitos"
+
+#: src/window/mod.rs:590
 msgid "Ok, Got It"
 msgstr "Entendido"
 
-#: src/window/mod.rs:303
+#: src/window/mod.rs:613
 msgid "Open Preferences?"
 msgstr "¿Quiere abrir las preferencias?"
 
-#: src/window/mod.rs:304
+#: src/window/mod.rs:614
 msgid ""
 "The previously selected format may have been unavailable. Open preferences "
 "and select a format to continue recording."
@@ -638,240 +1107,45 @@ msgstr ""
 "Es posible que el formato seleccionado anteriormente no esté disponible. "
 "Abra las preferencias y seleccione un formato para seguir grabando."
 
-#: src/window/mod.rs:308
+#: src/window/mod.rs:618
 msgid "Later"
 msgstr "Después"
 
-#: src/window/mod.rs:310
+#: src/window/mod.rs:620
 msgid "Open"
 msgstr "Abrir"
 
-#: src/window/mod.rs:461
+#: src/window/mod.rs:908
 msgid "A recording is in progress"
 msgstr "Grabación en curso"
 
-#: src/window/mod.rs:499
+#: src/window/mod.rs:980
 msgid "Recording"
 msgstr "Grabando"
 
-#: src/window/mod.rs:507
+#: src/window/mod.rs:988
 msgid "Paused"
 msgstr "En pausa"
 
-#: src/window/mod.rs:544
+#: src/window/mod.rs:1104
 msgid "Normal"
 msgstr "Normal"
 
-#: src/window/mod.rs:545
+#: src/window/mod.rs:1105
 msgid "Selection"
 msgstr "Selección"
 
-#: src/window/mod.rs:760
+#: src/window/mod.rs:1338
 msgid "Camera overlay unavailable"
 msgstr "La cámara en pantalla no está disponible"
 
-#: data/resources/ui/window.ui
-msgid "_Requirements Report"
-msgstr "_Reporte de requisitos"
+#: src/window/mod.rs:1353
+msgid "Stop the recording to mark an area"
+msgstr "Detenga la grabación para marcar un área"
 
-#: src/window/mod.rs
-msgid "Open Requirements Report"
-msgstr "Abrir el reporte de requisitos"
-
-#: src/main.rs
-msgid "Print the requirements report and exit"
-msgstr "Imprime el reporte de requisitos y sale"
-
-#: src/doctor/dialog.rs
-msgid "Requirements Report"
-msgstr "Reporte de requisitos"
-
-#: src/doctor/dialog.rs
-msgid "Copy Report"
-msgstr "Copiar reporte"
-
-#: src/doctor/mod.rs src/doctor/dialog.rs
-msgid "Problem"
-msgstr "Problema"
-
-#: src/doctor/mod.rs src/doctor/dialog.rs
-msgid "What stops working"
-msgstr "Qué deja de funcionar"
-
-#: src/doctor/mod.rs src/doctor/dialog.rs
-msgid "How to fix it"
-msgstr "Cómo arreglarlo"
-
-#: src/doctor/checks.rs
-msgid "GStreamer Elements"
-msgstr "Elementos de GStreamer"
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "Missing GStreamer elements: {elements}."
-msgstr "Faltan elementos de GStreamer: {elements}."
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "Unknown package for {element}."
-msgstr "Se desconoce el paquete de {element}."
-
-#: src/doctor/checks.rs
-msgid "Recording does not work."
-msgstr "No se puede grabar."
-
-#: src/doctor/checks.rs
-msgid "The camera overlay may not be able to show the camera."
-msgstr "Puede que no se pueda mostrar la cámara en pantalla."
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "These formats cannot be used: {formats}."
-msgstr "No se pueden usar estos formatos: {formats}."
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "Reinstall Kooha: it includes {elements}."
-msgstr "Reinstale Kooha: incluye {elements}."
-
-#: src/doctor/checks.rs
-msgid "Screen Capture Portal"
-msgstr "Portal de captura de pantalla"
-
-#. Translators: No pointer modes are available.
-#: src/doctor/checks.rs
-msgid "none"
-msgstr "ninguno"
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "Version {version} · pointer: {modes}"
-msgstr "Versión {version} · puntero: {modes}"
-
-#: src/doctor/checks.rs
-msgid "The screen capture portal does not respond."
-msgstr "El portal de captura de pantalla no responde."
-
-#: src/doctor/checks.rs
-msgid "Nothing can be recorded."
-msgstr "No se puede grabar nada."
-
-#: src/doctor/checks.rs
-msgid "PipeWire"
-msgstr "PipeWire"
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "Version {version}"
-msgstr "Versión {version}"
-
-#: src/doctor/checks.rs
-msgid "PipeWire is not running."
-msgstr "PipeWire no está en ejecución."
-
-#: src/doctor/checks.rs
-msgid "Audio Devices"
-msgstr "Dispositivos de audio"
-
-#: src/doctor/checks.rs
-msgid "There is no default output device."
-msgstr "No hay un dispositivo de salida predeterminado."
-
-#: src/doctor/checks.rs
-msgid "Desktop audio cannot be recorded."
-msgstr "No se puede grabar el audio del escritorio."
-
-#: src/doctor/checks.rs
-msgid "There is no default microphone."
-msgstr "No hay un micrófono predeterminado."
-
-#: src/doctor/checks.rs
-msgid "The microphone cannot be recorded."
-msgstr "No se puede grabar el micrófono."
-
-#: src/doctor/checks.rs
-msgid "Connect the device and choose it as the default in the sound settings."
-msgstr ""
-"Conecte el dispositivo y elíjalo como predeterminado en la configuración de "
-"sonido."
-
-#: src/doctor/checks.rs
-msgid "Cameras"
-msgstr "Cámaras"
-
-#. Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
-#: src/doctor/checks.rs
-msgid "{count} camera"
-msgid_plural "{count} cameras"
-msgstr[0] "{count} cámara"
-msgstr[1] "{count} cámaras"
-
-#: src/doctor/checks.rs
-msgid "No camera was found."
-msgstr "No se encontró ninguna cámara."
-
-#: src/doctor/checks.rs
-msgid "The camera overlay cannot be shown."
-msgstr "No se puede mostrar la cámara en pantalla."
-
-#: src/doctor/checks.rs
-msgid "Screen Overlays"
-msgstr "Capas en pantalla"
-
-#: src/doctor/checks.rs
-msgid "The camera overlay and the area border cannot be shown."
-msgstr "No se pueden mostrar la cámara en pantalla ni el borde del área."
-
-#: src/doctor/checks.rs
-msgid "Then rebuild Kooha."
-msgstr "Después vuelva a compilar Kooha."
-
-#: src/doctor/checks.rs
-msgid "Your desktop does not support screen overlays (wlr-layer-shell)."
-msgstr "Su escritorio no admite capas en pantalla (wlr-layer-shell)."
-
-#: src/doctor/checks.rs
-msgid "Could not ask the desktop without a display."
-msgstr "No se pudo consultar al escritorio sin una pantalla."
-
-#: src/doctor/checks.rs
-msgid "Tray Icon"
-msgstr "Ícono de bandeja"
-
-#: src/doctor/checks.rs
-msgid "Then enable the AppIndicator extension and log in again."
-msgstr "Después active la extensión AppIndicator y vuelva a iniciar sesión."
-
-#: src/doctor/checks.rs
-msgid "Add a system tray to your desktop panel."
-msgstr "Agregue una bandeja del sistema al panel del escritorio."
-
-#: src/doctor/checks.rs
-msgid "No system tray is available (org.kde.StatusNotifierWatcher)."
-msgstr "No hay una bandeja del sistema disponible (org.kde.StatusNotifierWatcher)."
-
-#: src/doctor/checks.rs
-msgid "The tray icon is not shown."
-msgstr "No se muestra el ícono de bandeja."
-
-#: src/doctor/checks.rs
-msgid "The recordings folder does not exist."
-msgstr "La carpeta de grabaciones no existe."
-
-#: src/doctor/checks.rs
-msgid "Recordings cannot be saved."
-msgstr "No se pueden guardar las grabaciones."
-
-#: src/doctor/checks.rs
-msgid "The recordings folder is not writable."
-msgstr "No se puede escribir en la carpeta de grabaciones."
-
-#: src/doctor/checks.rs
-msgid ""
-"Check the owner and the permissions of the folder, or choose another one in "
-"Preferences."
-msgstr ""
-"Revise el dueño y los permisos de la carpeta, o elija otra en Preferencias."
+#: src/window/mod.rs:1360
+msgid "The area “{name}” is gone; the new one is the last area"
+msgstr "El área «{name}» ya no existe; la nueva es la última área"
 
 #~ msgid "Donate (Buy Me a Coffee)"
 #~ msgstr "Donar (cómprame un café)"

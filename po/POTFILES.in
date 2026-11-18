@@ -2,11 +2,17 @@ data/io.github.seadve.Kooha.desktop.in.in
 data/io.github.seadve.Kooha.gschema.xml.in
 data/io.github.seadve.Kooha.metainfo.xml.in.in
 data/resources/ui/area_selector.ui
+data/resources/ui/areas_window.ui
 data/resources/ui/preferences_dialog.ui
 data/resources/ui/shortcuts.ui
 data/resources/ui/window.ui
 src/about.rs
 src/application.rs
+src/area_marker/save_dialog.rs
+src/area_marker/view.rs
+src/areas/model.rs
+src/areas/store.rs
+src/areas_window.rs
 src/camera_pip/caps.rs
 src/capture_warnings.rs
 src/device.rs
@@ -20,4 +26,5 @@ src/recording.rs
 src/settings.rs
 src/tray/model.rs
 src/tray/service.rs
+src/window/area_row.rs
 src/window/mod.rs
