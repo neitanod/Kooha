@@ -359,8 +359,8 @@ impl Inner {
             .connect_changed(|entry| entry.remove_css_class("error"));
     }
 
-    /// Enter on the size field: a new size is applied; the size already
-    /// shown confirms.
+    /// Enter on the size field: a new size is applied and the rectangle
+    /// takes the focus back; the size already shown confirms.
     fn size_entered(&self, text: &str) {
         let current = self
             .state
@@ -378,7 +378,13 @@ impl Inner {
 
         let result = self.state.borrow_mut().set_size(width, height);
         match result {
-            Ok(()) => self.update(true),
+            Ok(()) => {
+                self.update(true);
+                // The field would keep Left and Right to move its cursor;
+                // on the rectangle every arrow moves it, and Enter confirms
+                // (fable code r1 #10).
+                self.drawing_area.grab_focus();
+            }
             Err(_) => self.entry.add_css_class("error"),
         }
     }
@@ -681,6 +687,48 @@ mod tests {
         layer.clear();
         assert_eq!(layer.state().rect(), None);
         assert!(!layer.0.bubble.get_visible());
+        layer.destroy();
+    }
+
+    /// The layer is built, never presented.
+    #[gtk::test]
+    fn a_typed_size_gives_the_focus_back_to_the_rectangle() {
+        if overlay::availability().is_err() {
+            eprintln!("Skipped: layers unavailable");
+            return;
+        }
+        let Some((gdk_monitor, info)) = gdk::Display::default().and_then(|display| {
+            crate::areas::monitors::current_with_gdk(&display)
+                .into_iter()
+                .next()
+        }) else {
+            eprintln!("Skipped: no monitor");
+            return;
+        };
+
+        let initial = Rect {
+            x: 10,
+            y: 20,
+            width: 400,
+            height: 300,
+        };
+        let layer = MarkerLayer::new(&gdk_monitor, info, Some(initial), Rc::new(|_| false));
+        let focus_in_entry = || {
+            GtkWindowExt::focus(&layer.0.window)
+                .is_some_and(|focus| focus.is_ancestor(&layer.0.entry) || focus == layer.0.entry)
+        };
+        layer.0.entry.grab_focus();
+        assert!(focus_in_entry());
+
+        // A size that doesn't fit keeps the focus in the field, to fix it.
+        layer.0.size_entered("100000×300");
+        assert!(focus_in_entry());
+
+        // A size that fits sends it back, so that every arrow moves the
+        // rectangle (fable code r1 #10).
+        layer.0.size_entered("800×600");
+        assert_eq!(layer.state().rect().map(|rect| rect.width), Some(800));
+        assert!(layer.0.drawing_area.is_focus());
         layer.destroy();
     }
 }
