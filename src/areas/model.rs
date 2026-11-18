@@ -1,8 +1,5 @@
 //! Marked areas: a rectangle on one monitor, in physical (video) pixels.
 
-// The types are used by the areas list and the marker, added in later commits.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::gettext_f;
@@ -122,6 +119,14 @@ impl MarkedArea {
 pub struct SavedArea {
     pub name: String,
     #[serde(flatten)]
+    pub area: MarkedArea,
+}
+
+/// The area chosen to record: a saved one, with its name, or the last
+/// marked one, with no name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChosenArea {
+    pub name: Option<String>,
     pub area: MarkedArea,
 }
 
