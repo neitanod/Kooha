@@ -160,21 +160,54 @@ fn parse(bytes: &[u8]) -> Result<Result<AreasFile, String>, LoadError> {
 }
 
 /// Writes `file` to `path` atomically: to `<path>.tmp-<pid>` first, synced,
-/// then renamed over `path`. Creates the directory if needed.
+/// then renamed over `path`. Creates the directory if needed. On a failure
+/// `path` keeps its previous contents and the temporary file is removed.
 pub fn save(path: &Path, file: &AreasFile) -> io::Result<()> {
+    save_with(path, file, rename)
+}
+
+/// `save()` with the rename that puts the temporary file in place, so that a
+/// test can make it fail after the temporary file is written.
+fn save_with(
+    path: &Path,
+    file: &AreasFile,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let json = serde_json::to_string_pretty(file).map_err(io::Error::other)?;
     let tmp = temporary_path(path);
-    let mut out = fs::File::create(&tmp)?;
-    out.write_all(json.as_bytes())?;
-    out.write_all(b"\n")?;
-    out.sync_all()?;
-    drop(out);
+    let result = write_synced(&tmp, json.as_bytes()).and_then(|()| rename(&tmp, path));
+    if result.is_err() {
+        // Whatever failed, `path` still holds the previous file; the
+        // temporary one would only be left behind.
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
 
-    fs::rename(&tmp, path)
+fn write_synced(path: &Path, json: &[u8]) -> io::Result<()> {
+    let mut out = fs::File::create(path)?;
+    out.write_all(json)?;
+    out.write_all(b"\n")?;
+    out.sync_all()
+}
+
+#[cfg(not(test))]
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// `fs::rename`, unless the test made it fail with `test_utils::FailRename`.
+#[cfg(test)]
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    if test_utils::FAIL_RENAME.get() {
+        Err(io::Error::other("rename failed on purpose"))
+    } else {
+        fs::rename(from, to)
+    }
 }
 
 /// Per process, so that two Kooha instances never write the same one.
@@ -196,9 +229,30 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use std::{fs, path::PathBuf};
+    use std::{cell::Cell, fs, path::PathBuf};
 
     use gtk::glib;
+
+    thread_local! {
+        pub(super) static FAIL_RENAME: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// While alive, every `save()` on this thread fails at the rename, after
+    /// writing the temporary file.
+    pub(crate) struct FailRename;
+
+    impl FailRename {
+        pub(crate) fn new() -> Self {
+            FAIL_RENAME.set(true);
+            Self
+        }
+    }
+
+    impl Drop for FailRename {
+        fn drop(&mut self) {
+            FAIL_RENAME.set(false);
+        }
+    }
 
     /// A temporary directory, removed with its contents on drop.
     pub(crate) struct TempDir(pub(crate) PathBuf);
@@ -378,6 +432,30 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&link).unwrap(), "old");
         assert_eq!(load(&path).unwrap(), sample());
+        let names = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["rectangles.json"]);
+    }
+
+    #[test]
+    fn failed_rename_keeps_the_previous_file() {
+        let dir = TempDir::new();
+        let path = write(&dir, "old");
+        let mut written = None;
+
+        let err = save_with(&path, &sample(), |tmp, to| {
+            assert_eq!(to, path);
+            written = Some(fs::read_to_string(tmp).unwrap());
+            Err(io::Error::other("rename failed on purpose"))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "rename failed on purpose");
+        let written = written.expect("The rename was never tried");
+        assert!(written.contains(r#""name": "Demo""#), "{written}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
         let names = fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

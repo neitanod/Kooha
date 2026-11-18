@@ -373,7 +373,10 @@ mod tests {
     use std::{cell::Cell, fs, rc::Rc};
 
     use super::*;
-    use crate::areas::file::{self, test_utils::TempDir};
+    use crate::areas::file::{
+        self,
+        test_utils::{FailRename, TempDir},
+    };
 
     fn area(x: i32) -> MarkedArea {
         MarkedArea {
@@ -789,5 +792,34 @@ mod tests {
         assert_eq!(failed.borrow().len(), 1);
         assert_eq!(names(&store), ["Demo", "Other"]);
         assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_rename_leaves_the_previous_file_intact() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        let store = AreaStore::with_path(path.clone());
+        store.save_named("Demo", area(100), false).unwrap();
+        let before = fs::read(&path).unwrap();
+        let failed = failures(&store);
+
+        {
+            let _fail = FailRename::new();
+            store.save_named("Other", area(1), false).unwrap();
+        }
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(failed.borrow().len(), 1);
+        assert!(
+            failed.borrow()[0].contains("rename failed on purpose"),
+            "{:?}",
+            failed.borrow()
+        );
+        assert_eq!(names(&store), ["Demo", "Other"]);
+        let names = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["rectangles.json"]);
     }
 }
