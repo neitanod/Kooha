@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{io, path::Path};
 
 use adw::{prelude::*, subclass::prelude::*};
 use gettextrs::gettext;
@@ -74,6 +74,8 @@ mod imp {
         pub(super) camera_enabled_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(super) camera_source_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(super) keep_framerate_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(super) camera_shape_row: TemplateChild<adw::ComboRow>,
         #[template_child]
@@ -161,6 +163,9 @@ mod imp {
             obj.setup_pause_flash_color_row();
             settings
                 .bind_camera_enabled(&self.camera_enabled_row.get(), "active")
+                .build();
+            settings
+                .bind_camera_keep_framerate(&self.keep_framerate_row.get(), "active")
                 .build();
             settings.connect_saving_location_changed(clone!(
                 #[weak]
@@ -299,6 +304,22 @@ impl PreferencesDialog {
                 position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32),
             );
         });
+
+        self.update_keep_framerate_subtitle();
+    }
+
+    /// Tells whether the chosen camera has the control that "Keep Camera
+    /// Frame Rate" changes.
+    fn update_keep_framerate_subtitle(&self) {
+        let imp = self.imp();
+
+        let sources = imp.camera_sources.borrow();
+        // Without a V4L2 node, or with a node without the control.
+        let has_control = devices::choose(&sources, &self.settings().camera_device())
+            .and_then(|source| camera_pip::v4l2::video_node(&source.id))
+            .is_some_and(|node| keep_framerate_control(node).is_ok());
+        imp.keep_framerate_row
+            .set_subtitle(&keep_framerate_subtitle(has_control));
     }
 
     fn update_camera_monitor_row_selected(&self) {
@@ -368,6 +389,7 @@ impl PreferencesDialog {
             for row in [
                 imp.camera_enabled_row.upcast_ref::<gtk::Widget>(),
                 imp.camera_source_row.upcast_ref(),
+                imp.keep_framerate_row.upcast_ref(),
                 imp.camera_shape_row.upcast_ref(),
                 imp.camera_monitor_row.upcast_ref(),
             ] {
@@ -761,6 +783,28 @@ fn update_framerate_row_shows_warning_icon(settings: &Settings, list_item: &gtk:
     );
 }
 
+/// The subtitle of the "Keep Camera Frame Rate" row, from whether the chosen
+/// camera has `exposure_dynamic_framerate`.
+fn keep_framerate_subtitle(has_control: bool) -> String {
+    if has_control {
+        gettext("In low light the picture gets darker instead of choppy")
+    } else {
+        gettext("This camera can't change it")
+    }
+}
+
+/// The `exposure_dynamic_framerate` value of the camera node, read without
+/// streaming, which does not turn on the camera light.
+#[cfg(not(test))]
+fn keep_framerate_control(node: &Path) -> io::Result<i32> {
+    camera_pip::v4l2::get_control(node, camera_pip::v4l2::EXPOSURE_DYNAMIC_FRAMERATE)
+}
+
+#[cfg(test)]
+fn keep_framerate_control(node: &Path) -> io::Result<i32> {
+    tests::fake_control(node)
+}
+
 /// Why the camera and the area border are off, for the user.
 fn overlay_unavailable_text(reason: OverlayUnavailable) -> String {
     match reason {
@@ -860,6 +904,25 @@ mod tests {
 
     use crate::settings::test_utils::{init_resources, settings_lock, setup_schema};
 
+    use std::{cell::RefCell, path::PathBuf};
+
+    thread_local! {
+        /// The `exposure_dynamic_framerate` value of each fake device node.
+        static FAKE_CONTROLS: RefCell<Vec<(PathBuf, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Stands for the ioctl in tests, which never open `/dev/video*`: that
+    /// could turn on the camera light.
+    pub(super) fn fake_control(node: &Path) -> io::Result<i32> {
+        FAKE_CONTROLS.with_borrow(|controls| {
+            controls
+                .iter()
+                .find(|(path, _)| path == node)
+                .map(|&(_, value)| value)
+                .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+        })
+    }
+
     #[track_caller]
     fn assert_simplified_framerate(framerate: gst::Fraction) {
         let reduced = framerate.0.reduced();
@@ -926,11 +989,12 @@ mod tests {
         settings.reset("pause-flash-color");
     }
 
-    const CAMERA_KEYS: [&str; 4] = [
+    const CAMERA_KEYS: [&str; 5] = [
         "camera-enabled",
         "camera-device",
         "camera-shape",
         "camera-monitor",
+        "camera-keep-framerate",
     ];
 
     fn camera_dialog() -> (Settings, PreferencesDialog) {
@@ -968,6 +1032,70 @@ mod tests {
         settings.set_camera_shape(CameraShape::Circle);
         assert_eq!(imp.camera_shape_row.selected(), 0);
 
+        reset_camera_keys(&settings);
+    }
+
+    #[gtk::test]
+    fn keep_framerate_row_is_bound() {
+        let _lock = settings_lock();
+        let (settings, dialog) = camera_dialog();
+        let imp = dialog.imp();
+
+        // On by default (P15).
+        assert!(imp.keep_framerate_row.is_active());
+        imp.keep_framerate_row.set_active(false);
+        assert!(!settings.camera_keep_framerate());
+        settings.set_camera_keep_framerate(true);
+        assert!(imp.keep_framerate_row.is_active());
+
+        reset_camera_keys(&settings);
+    }
+
+    #[test]
+    fn keep_framerate_subtitle_says_when_the_camera_cannot() {
+        let can = "In low light the picture gets darker instead of choppy";
+        let cannot = "This camera can't change it";
+        assert_eq!(keep_framerate_subtitle(true), can);
+        assert_eq!(keep_framerate_subtitle(false), cannot);
+    }
+
+    /// The subtitle reads the control of the chosen source, through
+    /// `FAKE_CONTROLS` instead of the device node.
+    #[gtk::test]
+    fn keep_framerate_subtitle_follows_the_chosen_camera() {
+        let _lock = settings_lock();
+        let (settings, dialog) = camera_dialog();
+        let imp = dialog.imp();
+        FAKE_CONTROLS.with_borrow_mut(|controls| {
+            *controls = vec![(PathBuf::from("/dev/video2"), 1)];
+        });
+
+        dialog.set_camera_sources(&[
+            CameraSource {
+                id: "/dev/video2".to_string(),
+                name: "Webcam".to_string(),
+            },
+            CameraSource {
+                id: "/dev/video4".to_string(),
+                name: "Capture Card".to_string(),
+            },
+            CameraSource {
+                id: "OBS".to_string(),
+                name: "OBS Virtual Camera".to_string(),
+            },
+        ]);
+        let subtitle = || imp.keep_framerate_row.subtitle().unwrap_or_default();
+
+        // An empty `camera-device` uses the first source.
+        assert_eq!(subtitle(), keep_framerate_subtitle(true));
+        settings.set_camera_device("/dev/video4");
+        assert_eq!(subtitle(), keep_framerate_subtitle(false));
+        settings.set_camera_device("OBS");
+        assert_eq!(subtitle(), keep_framerate_subtitle(false));
+        settings.set_camera_device("/dev/video2");
+        assert_eq!(subtitle(), keep_framerate_subtitle(true));
+
+        FAKE_CONTROLS.with_borrow_mut(Vec::clear);
         reset_camera_keys(&settings);
     }
 
@@ -1052,6 +1180,7 @@ mod tests {
         for row in [
             imp.camera_enabled_row.upcast_ref::<gtk::Widget>(),
             imp.camera_source_row.upcast_ref(),
+            imp.keep_framerate_row.upcast_ref(),
             imp.camera_shape_row.upcast_ref(),
             imp.camera_monitor_row.upcast_ref(),
         ] {

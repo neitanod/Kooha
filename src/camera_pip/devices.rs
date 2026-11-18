@@ -214,7 +214,7 @@ fn device_id(device: &gst::Device) -> String {
     property(device, "device.path").unwrap_or_else(|| device.display_name().to_string())
 }
 
-fn device_path(device: &gst::Device) -> Option<String> {
+pub(super) fn device_path(device: &gst::Device) -> Option<String> {
     DEVICE_PATH_PROPERTIES
         .iter()
         .find_map(|name| property(device, name))

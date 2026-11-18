@@ -103,6 +103,12 @@
               </object>
             </child>
             <child>
+              <!-- The subtitle is set in code: it depends on the camera. -->
+              <object class="AdwSwitchRow" id="keep_framerate_row">
+                <property name="title" translatable="yes">Keep Camera Frame Rate</property>
+              </object>
+            </child>
+            <child>
               <object class="AdwComboRow" id="camera_shape_row">
                 <property name="title" translatable="yes">Camera Shape</property>
                 <property name="subtitle" translatable="yes">Right-click the camera to switch</property>

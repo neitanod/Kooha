@@ -1403,6 +1403,7 @@ dependencies = [
  "gtk4-layer-shell",
  "ksni",
  "libadwaita",
+ "libc",
  "once_cell",
  "serde",
  "serde_json",

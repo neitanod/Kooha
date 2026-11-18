@@ -4,9 +4,15 @@
 pub mod caps;
 pub mod devices;
 pub mod geometry;
+pub mod v4l2;
 pub mod view;
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use gst::prelude::*;
@@ -64,6 +70,11 @@ mod imp {
         /// that is a camera that could not be opened.
         pub(super) camera_playing: Cell<bool>,
         pub(super) prepare_pending: Cell<bool>,
+        /// The V4L2 node of the running camera, if it has one.
+        pub(super) camera_node: RefCell<Option<PathBuf>>,
+        /// The node and the `exposure_dynamic_framerate` value to write back
+        /// when the camera stops.
+        pub(super) restore_control: RefCell<Option<(PathBuf, i32)>>,
         pub(super) drag: RefCell<DragTracker>,
         /// Applies the drag once per frame while dragging.
         pub(super) drag_tick: RefCell<Option<gtk::TickCallbackId>>,
@@ -305,6 +316,9 @@ impl CameraPip {
             .pipeline
             .replace(Some((pipeline, bus_watch_guard)));
 
+        self.imp().camera_node.replace(camera_node(&device));
+        self.keep_camera_framerate();
+
         Ok(())
     }
 
@@ -315,8 +329,65 @@ impl CameraPip {
             tracing::warn!("Failed to stop the camera pipeline: {:?}", err);
         }
 
+        self.restore_camera_controls();
+        self.imp().camera_node.take();
+
         if let Some(view) = self.imp().view.get() {
             view.set_paintable(None);
+        }
+    }
+
+    /// Writes 0 to `exposure_dynamic_framerate` of the running camera, if
+    /// `camera-keep-framerate` asks for it, so that in low light the picture
+    /// gets darker instead of choppy (P15).
+    fn keep_camera_framerate(&self) {
+        let imp = self.imp();
+
+        self.restore_camera_controls();
+
+        let Some(node) = imp.camera_node.borrow().clone() else {
+            return;
+        };
+        let current = v4l2::get_control(&node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE)
+            .inspect_err(|err| {
+                tracing::debug!(
+                    "No `exposure_dynamic_framerate` on {}: {:?}",
+                    node.display(),
+                    err
+                );
+            })
+            .ok();
+        let Some(restore_to) =
+            keep_framerate_plan(self.settings().camera_keep_framerate(), current)
+        else {
+            return;
+        };
+
+        match v4l2::set_control(&node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE, 0) {
+            Ok(()) => {
+                imp.restore_control.replace(Some((node, restore_to)));
+            }
+            Err(err) => tracing::warn!(
+                "Failed to keep the frame rate of {}: {:?}",
+                node.display(),
+                err
+            ),
+        }
+    }
+
+    /// Writes back the `exposure_dynamic_framerate` value that
+    /// `keep_camera_framerate` replaced, if any. Stopping the camera does it;
+    /// the app also calls it when it quits, which may not dispose of the
+    /// `PiP`.
+    pub fn restore_camera_controls(&self) {
+        if let Some((node, value)) = self.imp().restore_control.take()
+            && let Err(err) = v4l2::set_control(&node, v4l2::EXPOSURE_DYNAMIC_FRAMERATE, value)
+        {
+            tracing::warn!(
+                "Failed to restore the frame rate setting of {}: {:?}",
+                node.display(),
+                err
+            );
         }
     }
 
@@ -706,6 +777,17 @@ impl CameraPip {
             self,
             move |_| obj.follow_camera_monitor()
         ));
+        settings.connect_camera_keep_framerate_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |settings| {
+                if settings.camera_keep_framerate() {
+                    obj.keep_camera_framerate();
+                } else {
+                    obj.restore_camera_controls();
+                }
+            }
+        ));
     }
 
     fn restart_pipeline(&self) {
@@ -956,6 +1038,20 @@ fn camera_pipeline(
     ));
 
     Ok(pipeline)
+}
+
+/// What to do with `exposure_dynamic_framerate` when the camera starts, from
+/// the `camera-keep-framerate` setting and the control's value, if the camera
+/// has it. With `Some(restore_to)`, Kooha writes 0, so that the camera keeps
+/// its frame rate in low light, and writes `restore_to` back when it stops.
+fn keep_framerate_plan(enabled: bool, current: Option<i32>) -> Option<i32> {
+    current.filter(|&value| enabled && value != 0)
+}
+
+/// The V4L2 node of `device`, if it has one.
+fn camera_node(device: &gst::Device) -> Option<PathBuf> {
+    let path = devices::device_path(device)?;
+    v4l2::video_node(&path).map(Path::to_path_buf)
 }
 
 /// Links the first video pad of `decodebin` to `convert`.
@@ -1457,6 +1553,14 @@ mod tests {
             monitor_crossing((-300, 400), (200, 200), 1, &[HDMI, EDP, DP]),
             None
         );
+    }
+
+    #[test]
+    fn keep_framerate_plan_writes_zero_only_when_needed() {
+        assert_eq!(keep_framerate_plan(false, Some(1)), None);
+        assert_eq!(keep_framerate_plan(true, None), None);
+        assert_eq!(keep_framerate_plan(true, Some(0)), None);
+        assert_eq!(keep_framerate_plan(true, Some(1)), Some(1));
     }
 
     #[test]
