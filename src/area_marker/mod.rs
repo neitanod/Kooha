@@ -7,6 +7,7 @@
 pub mod geometry;
 #[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
 mod monitor;
+pub mod save_dialog;
 #[cfg(feature = "layer-shell")]
 mod view;
 
