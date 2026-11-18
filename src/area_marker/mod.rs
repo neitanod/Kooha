@@ -704,7 +704,10 @@ mod layers {
             let layer = marker.layer(0).unwrap();
             // Pressed, not moved, not released: a 0×0 rectangle.
             layer.drag_without_release((40, 30), (40, 30));
-            assert_eq!(layer.rect().map(|rect| (rect.width, rect.height)), Some((0, 0)));
+            assert_eq!(
+                layer.rect().map(|rect| (rect.width, rect.height)),
+                Some((0, 0))
+            );
 
             assert!(marker.handle(
                 0,

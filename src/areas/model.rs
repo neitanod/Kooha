@@ -191,8 +191,14 @@ pub enum Staleness {
     /// The geometry itself can't be recorded.
     Invalid(InvalidArea),
     Disconnected,
-    SizeChanged { from: (i32, i32), to: (i32, i32) },
-    ScaleChanged { from: f64, to: f64 },
+    SizeChanged {
+        from: (i32, i32),
+        to: (i32, i32),
+    },
+    ScaleChanged {
+        from: f64,
+        to: f64,
+    },
 }
 
 impl Staleness {
@@ -506,11 +512,7 @@ mod tests {
                 scale,
                 ..area_on_dp3()
             };
-            assert_eq!(
-                area.validate(),
-                Err(InvalidArea::BadScale),
-                "scale {scale}"
-            );
+            assert_eq!(area.validate(), Err(InvalidArea::BadScale), "scale {scale}");
             assert_eq!(
                 area.staleness(&[dp3()]),
                 Some(Staleness::Invalid(InvalidArea::BadScale)),

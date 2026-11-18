@@ -54,9 +54,12 @@ pub struct EnabledActions {
 /// while an area is being marked or not. Marking needs no recording at
 /// all, not even one in `Init` while the portal opens its session;
 /// recording waits for the marking to end.
-pub fn enabled_actions(state: RecordingState, has_recording: bool, marking: bool) -> EnabledActions {
-    let idle =
-        !has_recording && matches!(state, RecordingState::Init | RecordingState::Finished);
+pub fn enabled_actions(
+    state: RecordingState,
+    has_recording: bool,
+    marking: bool,
+) -> EnabledActions {
+    let idle = !has_recording && matches!(state, RecordingState::Init | RecordingState::Finished);
     let busy = matches!(
         state,
         RecordingState::Delayed { .. } | RecordingState::Flushing { .. }

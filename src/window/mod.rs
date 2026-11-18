@@ -1897,8 +1897,14 @@ mod tests {
 
         let saved = store.areas();
         assert_eq!(saved.len(), 2);
-        assert_eq!((saved[0].name.as_str(), &saved[0].area), ("Demo", &area(100)));
-        assert_eq!((saved[1].name.as_str(), &saved[1].area), ("Talk", &area(200)));
+        assert_eq!(
+            (saved[0].name.as_str(), &saved[0].area),
+            ("Demo", &area(100))
+        );
+        assert_eq!(
+            (saved[1].name.as_str(), &saved[1].area),
+            ("Talk", &area(200))
+        );
     }
 
     // The settings lock keeps other tests off the shared settings while
@@ -1938,9 +1944,12 @@ mod tests {
         let window = test_window();
         let sent = RefCell::new(Vec::new());
 
-        window.show_recording_notice("Choose DP-3 (whole screen) in the sharing dialog", &|message| {
-            sent.borrow_mut().push(message.to_string());
-        });
+        window.show_recording_notice(
+            "Choose DP-3 (whole screen) in the sharing dialog",
+            &|message| {
+                sent.borrow_mut().push(message.to_string());
+            },
+        );
 
         assert_eq!(
             *sent.borrow(),
