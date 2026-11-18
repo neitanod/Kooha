@@ -10,10 +10,7 @@ use gettextrs::gettext;
 use gtk::{cairo, gdk, glib, prelude::*};
 use gtk4_layer_shell::{KeyboardMode, LayerShell};
 
-use super::{
-    geometry::{Handle, MarkState, Rect, parse_size},
-    monitor,
-};
+use super::geometry::{Handle, MarkState, Rect, parse_size};
 use crate::{areas::MonitorInfo, overlay};
 
 const LAYER_NAMESPACE: &str = "kooha-area-marker";
@@ -135,7 +132,7 @@ impl MarkerLayer {
         // The marker gives the keyboard to one layer.
         window.set_keyboard_mode(KeyboardMode::None);
 
-        let bounds = monitor::physical_size(&info);
+        let bounds = info.physical_size();
         let inner = Rc::new(Inner {
             window,
             drawing_area,
@@ -262,7 +259,7 @@ impl Inner {
             .build();
         drag.connect_drag_begin(with(&weak, |this, _: &gtk::GestureDrag, x, y| {
             this.drawing_area.grab_focus();
-            let (x, y) = monitor::to_physical(&this.info, x, y);
+            let (x, y) = this.info.to_physical(x, y);
             this.state.borrow_mut().press(x, y, this.slop());
             this.update(false);
         }));
@@ -270,7 +267,7 @@ impl Inner {
             let Some((x, y)) = gesture.start_point() else {
                 return;
             };
-            let (x, y) = monitor::to_physical(&this.info, x + dx, y + dy);
+            let (x, y) = this.info.to_physical(x + dx, y + dy);
             this.state.borrow_mut().motion(x, y);
             this.update(false);
         }));
@@ -282,7 +279,7 @@ impl Inner {
 
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion(with(&weak, |this, _: &gtk::EventControllerMotion, x, y| {
-            let (x, y) = monitor::to_physical(&this.info, x, y);
+            let (x, y) = this.info.to_physical(x, y);
             let state = this.state.borrow();
             // The cursor of the gesture in course stays.
             if state.is_dragging() {
@@ -405,8 +402,8 @@ impl Inner {
 
     /// `rect` as (x, y, width, height) in logical pixels of the layer.
     fn logical_rect(&self, rect: Rect) -> (f64, f64, f64, f64) {
-        let (x, y) = monitor::to_logical(&self.info, rect.x, rect.y);
-        let (width, height) = monitor::to_logical(&self.info, rect.width, rect.height);
+        let (x, y) = self.info.to_logical(rect.x, rect.y);
+        let (width, height) = self.info.to_logical(rect.width, rect.height);
         (x, y, width, height)
     }
 
@@ -640,9 +637,11 @@ mod tests {
             eprintln!("Skipped: layers unavailable");
             return;
         }
-        let Some((gdk_monitor, info)) = gdk::Display::default()
-            .and_then(|display| monitor::current(&display).into_iter().next())
-        else {
+        let Some((gdk_monitor, info)) = gdk::Display::default().and_then(|display| {
+            crate::areas::monitors::current_with_gdk(&display)
+                .into_iter()
+                .next()
+        }) else {
             eprintln!("Skipped: no monitor");
             return;
         };

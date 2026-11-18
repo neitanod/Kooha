@@ -11,12 +11,21 @@ use super::model::MonitorInfo;
 
 /// The valid monitors of `display`, in GDK's order.
 pub fn current(display: &gdk::Display) -> Vec<MonitorInfo> {
+    current_with_gdk(display)
+        .into_iter()
+        .map(|(_, info)| info)
+        .collect()
+}
+
+/// The valid monitors of `display`, in GDK's order, each with its
+/// `gdk::Monitor`.
+pub fn current_with_gdk(display: &gdk::Display) -> Vec<(gdk::Monitor, MonitorInfo)> {
     valid(display)
         .into_iter()
         .enumerate()
         .map(|(index, monitor)| {
             let geometry = monitor.geometry();
-            MonitorInfo {
+            let info = MonitorInfo {
                 connector: connector(&monitor, index),
                 logical: (
                     geometry.x(),
@@ -25,7 +34,8 @@ pub fn current(display: &gdk::Display) -> Vec<MonitorInfo> {
                     geometry.height(),
                 ),
                 scale: monitor.scale(),
-            }
+            };
+            (monitor, info)
         })
         .collect()
 }

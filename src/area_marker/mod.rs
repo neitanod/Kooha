@@ -5,8 +5,6 @@
 
 #[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
 pub mod geometry;
-#[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
-mod monitor;
 pub mod save_dialog;
 #[cfg(feature = "layer-shell")]
 mod view;
@@ -75,7 +73,10 @@ pub async fn mark(initial: Option<MarkedArea>) -> anyhow::Result<MarkedArea> {
         let display =
             gdk::Display::default().ok_or(LayersUnavailable(OverlayUnavailable::NoDisplay))?;
 
-        let (marker, result) = AreaMarker::new(monitor::current(&display), initial.as_ref());
+        let (marker, result) = AreaMarker::new(
+            crate::areas::monitors::current_with_gdk(&display),
+            initial.as_ref(),
+        );
         marker.present();
         let result = with_timeout(result, timeout_from(std::env::var(TIMEOUT_VARIABLE).ok())).await;
         drop(marker);
@@ -138,7 +139,7 @@ fn preload(initial: &MarkedArea, monitors: &[MonitorInfo]) -> Option<(usize, Rec
     let index = monitors
         .iter()
         .position(|monitor| monitor.connector == initial.connector)?;
-    let (width, height) = monitor::physical_size(&monitors[index]);
+    let (width, height) = monitors[index].physical_size();
     let fits = initial.x >= 0
         && initial.y >= 0
         && initial.x + initial.width <= width
@@ -157,7 +158,7 @@ fn preload(initial: &MarkedArea, monitors: &[MonitorInfo]) -> Option<(usize, Rec
 /// The marked area of `rect` on `monitor`.
 #[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
 fn finish(rect: Rect, monitor: &MonitorInfo) -> MarkedArea {
-    let (monitor_width, monitor_height) = monitor::physical_size(monitor);
+    let (monitor_width, monitor_height) = monitor.physical_size();
     MarkedArea {
         connector: monitor.connector.clone(),
         x: rect.x,
@@ -485,7 +486,7 @@ mod layers {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::area_marker::{geometry::Rect, monitor};
+        use crate::{area_marker::geometry::Rect, areas::monitors};
 
         /// Two layers on the first monitor, as if they were two monitors:
         /// built, never presented.
@@ -501,7 +502,7 @@ mod layers {
                 return None;
             }
             let Some((gdk_monitor, info)) = gdk::Display::default()
-                .and_then(|display| monitor::current(&display).into_iter().next())
+                .and_then(|display| monitors::current_with_gdk(&display).into_iter().next())
             else {
                 eprintln!("Skipped: no monitor");
                 return None;
@@ -700,7 +701,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::area_marker::monitor::tests::{dp3, edp};
+    use crate::areas::model::test_monitors::{dp3, edp};
 
     fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
         Rect {
