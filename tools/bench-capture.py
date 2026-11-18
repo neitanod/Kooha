@@ -3,7 +3,8 @@
 
 Records the same 1280x720 area at (200, 160) with each pipeline variant and
 prints one Markdown table per frame rate: frames the source delivered, frames
-lost on the way to the file, real FPS at the encoder output, CPU of this
+missing at the source, frames videorate duplicated, frames the queues dropped,
+whether the losses stay under 1 %, real FPS at the encoder output, CPU of this
 process, and whether the variant started at all.
 
 Usage:
@@ -26,8 +27,9 @@ Sources:
                      once permission was granted. Run it from the user's
                      graphical session. Once the stream arrives, it opens a
                      fullscreen window with a ball that bounces inside the
-                     measured area, on the monitor whose physical size matches
-                     the stream (`--no-ball-window` leaves it out). All the
+                     measured area, on the monitor whose logical (within 1
+                     px) or physical (within 2 px) size matches the stream's
+                     reported size (`--no-ball-window` leaves it out). All the
                      variants and frame rates share one session. A pass where
                      the source delivered under 90 % of the requested frames
                      in the `today` variant is marked as discarded: the
@@ -35,11 +37,12 @@ Sources:
 
 The restore token (portal and --probe-session). Before opening the session the
 current token is saved to /tmp/kooha-bench-token.bak. Start spends the token:
-KDE hands out a successor with every session. The script writes the successor
-to Kooha's key as soon as Start answers, before any pipeline runs, when the
-session started without a dialog (Start answered in under 2 s) and the stream
-is a monitor; it says when it leaves the key alone. If KDE showed the dialog,
-the key stays as it was and the script stops, unless `--allow-dialog`.
+KDE hands out a successor with every session. Whenever Start succeeds and the
+stream is a monitor, the script writes the successor to Kooha's key as soon as
+Start answers, before any pipeline runs, however long Start took: the original
+token is spent either way, and a restore without a dialog may be slow. It says
+when it leaves the key alone (the stream is not a monitor, or KDE gave no
+successor). The seconds Start took are printed, as a fact only.
 
 The .bak is only restored by hand
 (`gsettings set io.github.seadve.Kooha screencast-restore-token "$(cat
@@ -48,9 +51,10 @@ it sees another app id than Kooha's: then Kooha's original token is intact.
 
     --probe-session    Only opens and closes the session, to check whether KDE
                        accepts Kooha's token from a process that is not Kooha.
-    --allow-dialog     Go on measuring even if KDE showed the dialog; the key
-                       is still left as it was.
-    --write-token      With --allow-dialog, write the successor anyway.
+    --allow-dialog     Accepted and ignored: the script no longer guesses
+    --write-token      whether KDE showed a dialog, and always writes the
+                       successor of a monitor stream. Kept so that older
+                       command lines still run.
     --with-kde-region  At the end, opens a second session without the token for
                        KDE's own region sharing (pick a 1280x720 region in the
                        dialog) and records it as the `kde-region` variant. Its
@@ -84,14 +88,21 @@ Columns:
                    seconds to wake up); the measured window starts there
     source fps     buffers out of the source per second, in the window
     fps            buffers out of the encoder per second, in the window
-    source frames  buffers out of the source, up to EOS
-    frames         buffers out of the encoder, up to EOS
-    lost           frames the source delivered that did not reach the file,
-                   leaving out videorate's own work: frames lost before
-                   videorate (source frames - videorate in) plus frames lost
+    source frames  buffers out of the source, up to EOS: the frames captured
+    missing        frames missing at the source: the PTS of its buffers,
+                   before videorate, with each gap over 1.5 periods of the
+                   requested rate counted as round(gap / period) - 1 frames
+    dup            frames videorate duplicated to keep the rate; it fills
+                   what is missing at the source and what the leaky queue
+                   threw away, so `frames` alone hides both
+    queue drop     frames the queues dropped: lost before videorate (source
+                   frames - videorate in, the leaky capture queue) plus lost
                    after it (videorate out - frames)
-    dup, drop      frames videorate duplicated or dropped to keep the rate;
-                   dup also fills what the leaky queue threw away
+    ok <1%         "yes" when missing + queue drop stay within 1 % of the
+                   frames requested (what videorate pushed at the requested
+                   rate); "no" otherwise, or when nothing was recorded
+    frames         buffers out of the encoder, up to EOS
+    rate drop      frames videorate dropped because the source ran faster
     cpu %          utime + stime of this process (/proc/self/stat) in the
                    window, in % of one core; the test source's own rendering
                    counts too
@@ -129,8 +140,8 @@ ALL_VARIANTS = [
 PORTAL_ONLY = {"intel-dmabuf", "nvidia-dmabuf"}
 KDE_REGION = "kde-region"
 STARTUP_TIMEOUT = 15
-NO_DIALOG_SECONDS = 2.0
 MIN_SOURCE_SHARE = 0.9
+LOSS_LIMIT = 0.01
 TOKEN_BACKUP = "/tmp/kooha-bench-token.bak"
 KOOHA_SCHEMA = "io.github.seadve.Kooha"
 RESTORE_TOKEN_KEY = "screencast-restore-token"
@@ -169,18 +180,41 @@ def even(n):
     return n // 2 * 2
 
 
-def crop_props(frame):
-    """videocrop properties that cut AREA out of a frame of the given size."""
+def crop_sides(frame):
+    """videocrop's right and bottom that cut AREA out of a frame of this size."""
     x, y, width, height = AREA
     frame_w, frame_h = frame
-    right = max(0, frame_w - x - width)
-    bottom = max(0, frame_h - y - height)
-    return f"left={x} top={y} right={right} bottom={bottom}"
+    return max(0, frame_w - x - width), max(0, frame_h - y - height)
 
 
-def source_head(source, fps, stream, dmabuf=False):
+def caps_frame(caps):
+    s = caps.get_structure(0)
+    found_w, width = s.get_int("width")
+    found_h, height = s.get_int("height")
+    return (width, height) if found_w and found_h else None
+
+
+def on_caps(element, apply):
+    """Calls `apply(frame)` on the caps that reach `element`'s sink pad, before
+    the element configures itself with them.
+    """
+
+    def probe(_pad, info):
+        event = info.get_event()
+        if event is not None and event.type == Gst.EventType.CAPS:
+            frame = caps_frame(event.parse_caps())
+            if frame is not None:
+                apply(frame)
+        return Gst.PadProbeReturn.OK
+
+    element.get_static_pad("sink").add_probe(
+        Gst.PadProbeType.EVENT_DOWNSTREAM, probe
+    )
+
+
+def source_head(source, fps, stream, dmabuf=False, test_size=TEST_SIZE):
     if source == "test":
-        width, height = TEST_SIZE
+        width, height = test_size
         return (
             "videotestsrc name=source pattern=ball is-live=true ! "
             f"video/x-raw,format=BGRx,width={width},height={height},"
@@ -193,19 +227,20 @@ def source_head(source, fps, stream, dmabuf=False):
     return f"{head} ! video/x-raw(memory:DMABuf)" if dmabuf else head
 
 
-def pipeline_desc(variant, source, fps, stream):
-    frame = TEST_SIZE if source == "test" else stream["size"]
-    crop = f"videocrop {crop_props(frame)}"
+def pipeline_desc(variant, source, fps, stream, test_size=TEST_SIZE, out=None):
+    # right and bottom come from the negotiated frames (build_pipeline): the
+    # portal's `size` may be the logical one, smaller than the frames.
+    crop = f"videocrop name=crop left={AREA[0]} top={AREA[1]}"
     rate = f"videorate name=rate skip-to-first=true ! video/x-raw,framerate={fps}/1"
-    head = source_head(source, fps, stream)
+    head = source_head(source, fps, stream, test_size=test_size)
     flip = "videoflip video-direction=auto"
     plain_src = f"{head} ! {flip} ! {rate}"
     queued_src = f"{head} ! {flip} ! {CAPTURE_QUEUE} ! {rate}"
 
     if variant == "today":
-        width, height = even(frame[0]), even(frame[1])
+        # videoscale to the even size of the frames, set by build_pipeline.
         chain = (
-            f"{plain_src} ! videoscale ! video/x-raw,width={width},height={height} ! "
+            f"{plain_src} ! videoscale name=scale ! capsfilter name=scale-caps ! "
             f"{crop} ! queue name=videoenc-queue ! {X264}"
         )
     elif variant == "crop-first":
@@ -240,8 +275,41 @@ def pipeline_desc(variant, source, fps, stream):
     else:
         raise ValueError(variant)
 
-    sink = f"{MUXER} ! filesink location=/tmp/kooha-bench-{variant}-{fps}.mp4"
-    return f"{chain} ! {sink}"
+    out = out or f"/tmp/kooha-bench-{variant}-{fps}.mp4"
+    return f"{chain} ! {MUXER} ! filesink location={out}"
+
+
+def build_pipeline(variant, source, fps, stream, test_size=TEST_SIZE, out=None):
+    """Builds the variant's pipeline; raises GLib.Error if it does not parse.
+
+    The crop, and in `today` the scale to an even size, follow the caps the
+    frames arrive with, as make_area_crop does in src/pipeline.rs.
+    """
+    pipeline = Gst.parse_launch(
+        pipeline_desc(variant, source, fps, stream, test_size, out)
+    )
+
+    crop = pipeline.get_by_name("crop")
+    if crop is not None:
+
+        def set_crop(frame):
+            right, bottom = crop_sides(frame)
+            crop.set_property("right", right)
+            crop.set_property("bottom", bottom)
+
+        on_caps(crop, set_crop)
+
+    scale = pipeline.get_by_name("scale")
+    if scale is not None:
+        scale_caps = pipeline.get_by_name("scale-caps")
+
+        def set_scale(frame):
+            caps = f"video/x-raw,width={even(frame[0])},height={even(frame[1])}"
+            scale_caps.set_property("caps", Gst.Caps.from_string(caps))
+
+        on_caps(scale, set_scale)
+
+    return pipeline
 
 
 def process_cpu_seconds():
@@ -261,6 +329,7 @@ class Result:
         self.source_fps = 0.0
         self.fps = 0.0
         self.source_frames = 0
+        self.missing = 0
         self.frames = 0
         self.dup = 0
         self.drop = 0
@@ -269,41 +338,72 @@ class Result:
         self.cpu = 0.0
 
     @property
-    def lost(self):
+    def queue_drop(self):
         # videorate pushes one extra copy of the last frame at EOS, without
         # counting it as a duplicate; its in and out counters include it.
         return (self.source_frames - self.rate_in) + (self.rate_out - self.frames)
 
+    @property
+    def requested(self):
+        """The frames at the requested rate: what videorate pushed."""
+        return self.rate_out
+
+    @property
+    def ok(self):
+        lost = self.missing + self.queue_drop
+        return self.requested > 0 and lost <= LOSS_LIMIT * self.requested
+
     def row(self):
         started = "yes" if self.started else "no"
+        ok = "yes" if self.ok else "no"
         error = self.error.replace("|", "/").replace("\n", " ")
         return (
             f"| {self.variant} | {started} | {self.startup:.1f} | "
             f"{self.source_fps:.1f} | {self.fps:.1f} | {self.source_frames} | "
-            f"{self.frames} | {self.lost} | {self.dup} | {self.drop} | "
-            f"{self.cpu:.0f} | {error} |"
+            f"{self.missing} | {self.dup} | {self.queue_drop} | {ok} | "
+            f"{self.frames} | {self.drop} | {self.cpu:.0f} | {error} |"
         )
 
 
 TABLE_HEADER = (
-    "| variant | started | startup s | source fps | fps | source frames | frames "
-    "| lost | dup | drop | cpu % | error |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|"
+    "| variant | started | startup s | source fps | fps | source frames | missing "
+    "| dup | queue drop | ok <1% | frames | rate drop | cpu % | error |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 )
 
 
+def missing_frames(pts, period):
+    """Frames missing between consecutive PTS `period` nanoseconds apart.
+
+    A gap over 1.5 periods counts as round(gap / period) - 1 frames; a shorter
+    one is jitter. Buffers without a PTS are left out.
+    """
+    known = [p for p in pts if p != Gst.CLOCK_TIME_NONE]
+    missing = 0
+    for before, after in zip(known, known[1:]):
+        gap = after - before
+        if 2 * gap > 3 * period:
+            missing += round(gap / period) - 1
+    return missing
+
+
 class Counter:
-    """Counts the buffers through a pad and keeps their arrival times."""
+    """Counts the buffers through a pad and keeps their arrival times and
+    their PTS.
+    """
 
     def __init__(self):
         self.times = []
+        self.pts = []
         self.cpu_at_first = None
 
     def probe(self, _pad, info):
-        if info.get_buffer() is not None:
+        buffer = info.get_buffer()
+        if buffer is not None:
             if self.cpu_at_first is None:
                 self.cpu_at_first = process_cpu_seconds()
             self.times.append(time.monotonic())
+            self.pts.append(buffer.pts)
         return Gst.PadProbeReturn.OK
 
     def in_window(self, start, end):
@@ -318,10 +418,10 @@ def bus_error(msg):
     return "unexpected EOS"
 
 
-def run_variant(variant, source, fps, seconds, stream):
+def run_variant(variant, source, fps, seconds, stream, out=None):
     result = Result(variant)
     try:
-        pipeline = Gst.parse_launch(pipeline_desc(variant, source, fps, stream))
+        pipeline = build_pipeline(variant, source, fps, stream, out=out)
     except GLib.Error as e:
         result.error = f"does not build: {e.message}"
         return result
@@ -387,6 +487,7 @@ def run_variant(variant, source, fps, seconds, stream):
     pipeline.set_state(Gst.State.NULL)
 
     result.source_frames = len(source_count.times)
+    result.missing = missing_frames(source_count.pts, Gst.SECOND / fps)
     result.frames = len(encoded_count.times)
     result.started = result.frames > 0
     result.error = error or ""
@@ -543,35 +644,24 @@ def write_restore_token(token):
     )
 
 
-class DialogShown(Exception):
-    pass
-
-
-def token_writer(allow_dialog, write_token):
+def token_writer(write=None):
     """The on_started handler for Kooha's own session.
 
-    Writes the successor token to Kooha's key when the session started without
-    a dialog and the stream is a monitor. Raises DialogShown if KDE showed the
-    dialog and `allow_dialog` is off.
+    Writes the successor token to Kooha's key with `write` (by default
+    write_restore_token) whenever the stream is a monitor and KDE gave a
+    successor, however long Start took.
     """
+    write = write or write_restore_token
 
     def on_started(results, seconds):
         streams = results.get("streams", [])
         is_monitor = len(streams) == 1 and (
             streams[0][1].get("source_type", 0) == SOURCE_MONITOR
         )
-        dialog = seconds >= NO_DIALOG_SECONDS
         new_token = results.get("restore_token", "")
         print(f"Start answered in {seconds:.1f} s", flush=True)
 
-        if dialog and not allow_dialog:
-            raise DialogShown(
-                "KDE showed the dialog: Kooha's key is left as it was. Run "
-                "with --allow-dialog to measure anyway."
-            )
-        if dialog and not write_token:
-            print("KDE showed the dialog: Kooha's key is left as it was.", flush=True)
-        elif not is_monitor:
+        if not is_monitor:
             print(
                 "The stream is not a monitor: Kooha's key is left as it was.",
                 flush=True,
@@ -583,7 +673,7 @@ def token_writer(allow_dialog, write_token):
                 flush=True,
             )
         else:
-            write_restore_token(new_token)
+            write(new_token)
             print("Wrote the successor token to Kooha's key.", flush=True)
 
     return on_started
@@ -598,7 +688,7 @@ def open_kooha_session(portal, args):
         SOURCE_MONITOR,
         PERSIST_UNTIL_REVOKED,
         token,
-        token_writer(args.allow_dialog, args.write_token),
+        token_writer(),
     )
 
 
@@ -609,24 +699,45 @@ def open_region_session(portal):
     return portal.open(SOURCE_MONITOR | SOURCE_VIRTUAL, PERSIST_NONE, "", on_started)
 
 
+def pick_monitor(monitors, stream_size):
+    """The index of the monitor the stream shows, or None.
+
+    `monitors` holds (logical width, logical height, scale) per monitor. The
+    portal may report the stream's size in logical pixels (matched within 1)
+    or physical ones (within 2, for the rounding of a fractional scale).
+    """
+    stream_w, stream_h = stream_size
+
+    def near(size, tolerance):
+        return abs(size[0] - stream_w) <= tolerance and (
+            abs(size[1] - stream_h) <= tolerance
+        )
+
+    for i, (width, height, scale) in enumerate(monitors):
+        physical = (round(width * scale), round(height * scale))
+        if near((width, height), 1) or near(physical, 2):
+            return i
+    return None
+
+
 def ball_window(seconds, stream_size):
-    """Shows a ball bouncing inside AREA, fullscreen on the monitor whose
-    physical size is `stream_size`, so the stream has something that moves.
+    """Shows a ball bouncing inside AREA, fullscreen on the monitor the stream
+    shows (pick_monitor), so the stream has something that moves.
     """
     gi.require_version("Gtk", "4.0")
     from gi.repository import Gdk, Gtk
 
     Gtk.init()
     monitors = Gdk.Display.get_default().get_monitors()
-    monitor = None
-    for i in range(monitors.get_n_items()):
-        candidate = monitors.get_item(i)
-        geometry = candidate.get_geometry()
-        scale = candidate.get_scale()
-        size = (round(geometry.width * scale), round(geometry.height * scale))
-        if size == stream_size:
-            monitor = candidate
-            break
+    candidates = [monitors.get_item(i) for i in range(monitors.get_n_items())]
+    index = pick_monitor(
+        [
+            (m.get_geometry().width, m.get_geometry().height, m.get_scale())
+            for m in candidates
+        ],
+        stream_size,
+    )
+    monitor = None if index is None else candidates[index]
     if monitor is None:
         print(f"No monitor is {stream_size[0]}x{stream_size[1]}; no ball window")
         return
@@ -695,8 +806,9 @@ def parse_args(argv):
     )
     parser.add_argument("--out", help="also write the tables to this file")
     parser.add_argument("--no-ball-window", action="store_true")
-    parser.add_argument("--allow-dialog", action="store_true")
-    parser.add_argument("--write-token", action="store_true")
+    # No-ops, kept so that older command lines still run.
+    parser.add_argument("--allow-dialog", action="store_true", help="ignored")
+    parser.add_argument("--write-token", action="store_true", help="ignored")
     parser.add_argument("--with-kde-region", action="store_true")
     parser.add_argument("--probe-session", action="store_true")
     parser.add_argument("--ball-window", type=float, help=argparse.SUPPRESS)
@@ -812,7 +924,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except DialogShown as e:
-        sys.exit(str(e))
+    sys.exit(main(sys.argv[1:]))
