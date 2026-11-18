@@ -2,7 +2,14 @@ use anyhow::{Context, Ok, Result, bail, ensure};
 use gst::prelude::*;
 use gtk::graphene::Rect;
 
-use std::{os::unix::io::RawFd, path::PathBuf};
+use std::{
+    os::unix::io::RawFd,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::{
     area_selector::SelectAreaData,
@@ -234,6 +241,12 @@ pub fn link_gated_queue(
     let queue = gst::ElementFactory::make("queue")
         .name(queue_name)
         .build()?;
+    if branch == GatedBranch::Video {
+        // Room for a burst in the encoder without stalling the capture.
+        queue.set_property("max-size-buffers", 30_u32);
+        queue.set_property("max-size-time", 0_u64);
+        queue.set_property("max-size-bytes", 0_u32);
+    }
     pipeline.add_many([&identity, &queue])?;
     src.link(&identity)?;
 
@@ -492,17 +505,52 @@ fn make_area_crop(area: AreaCrop) -> Result<gst::Element> {
     Ok(videocrop)
 }
 
+/// Counts the frames the capture queue drops, and logs the total when the
+/// queue goes away.
+#[derive(Debug, Default)]
+struct DroppedFrames(Arc<AtomicU64>);
+
+impl Drop for DroppedFrames {
+    fn drop(&mut self) {
+        let dropped = self.0.load(Ordering::Relaxed);
+        tracing::info!(dropped, "Capture queue dropped frames");
+    }
+}
+
+/// Creates the queue between the capture and `videorate`. It holds three
+/// frames and, when full, drops the oldest instead of stalling `pipewiresrc`;
+/// `videorate` then fills the gap. Also returns the count of dropped frames.
+fn make_capture_queue() -> Result<(gst::Element, Arc<AtomicU64>)> {
+    let queue = gst::ElementFactory::make("queue")
+        .name("kooha-capture-queue")
+        .property("max-size-buffers", 3_u32)
+        .property("max-size-time", 0_u64)
+        .property("max-size-bytes", 0_u32)
+        .property_from_str("leaky", "downstream")
+        .build()?;
+
+    // A full leaky queue emits `overrun` and then drops one buffer.
+    let dropped = DroppedFrames::default();
+    let count = Arc::clone(&dropped.0);
+    queue.connect("overrun", false, move |_| {
+        dropped.0.fetch_add(1, Ordering::Relaxed);
+        None
+    });
+
+    Ok((queue, count))
+}
+
 /// Creates a bin with a src pad for multiple pipewire streams.
 ///
 /// Single stream:
 ///
-/// pipewiresrc -> videoflip -> videorate
+/// pipewiresrc -> videoflip -> capture queue -> videorate
 ///
 /// Multiple streams:
 ///
 /// pipewiresrc1 -> videoflip -> |
 ///                              |
-/// pipewiresrc2 -> videoflip -> | -> compositor -> videorate
+/// pipewiresrc2 -> videoflip -> | -> compositor -> capture queue -> videorate
 ///                              |
 /// pipewiresrcn -> videoflip -> |
 pub fn make_videosrc_bin(
@@ -525,8 +573,9 @@ pub fn make_videosrc_bin(
                 .build(),
         )
         .build()?;
-    bin.add_many([&videorate, &videorate_capsfilter])?;
-    videorate.link(&videorate_capsfilter)?;
+    let (capture_queue, _) = make_capture_queue()?;
+    bin.add_many([&capture_queue, &videorate, &videorate_capsfilter])?;
+    gst::Element::link_many([&capture_queue, &videorate, &videorate_capsfilter])?;
 
     match streams {
         [] => bail!("No streams provided"),
@@ -534,12 +583,12 @@ pub fn make_videosrc_bin(
             let pipewiresrc = make_pipewiresrc(fd, &stream.node_id().to_string())?;
             let videoflip = make_videoflip()?;
             bin.add_many([&pipewiresrc, &videoflip])?;
-            gst::Element::link_many([&pipewiresrc, &videoflip, &videorate])?;
+            gst::Element::link_many([&pipewiresrc, &videoflip, &capture_queue])?;
         }
         streams => {
             let compositor = gst::ElementFactory::make("compositor").build()?;
             bin.add(&compositor)?;
-            compositor.link(&videorate)?;
+            compositor.link(&capture_queue)?;
 
             let mut last_pos = 0;
             for stream in streams {
@@ -1065,5 +1114,90 @@ mod test {
                 frame: (1681, 1052),
             }
         );
+    }
+
+    fn queue_limits(queue: &gst::Element) -> (u32, u64, u32) {
+        (
+            queue.property::<u32>("max-size-buffers"),
+            queue.property::<u64>("max-size-time"),
+            queue.property::<u32>("max-size-bytes"),
+        )
+    }
+
+    fn leaky_nick(queue: &gst::Element) -> String {
+        let value = queue.property_value("leaky");
+        glib::EnumValue::from_value(&value)
+            .map(|(_, leaky)| leaky.nick().to_string())
+            .unwrap()
+    }
+
+    fn peer_factory(element: &gst::Element, pad_name: &str) -> String {
+        let peer = element
+            .static_pad(pad_name)
+            .and_then(|pad| pad.peer())
+            .and_then(|peer| peer.parent_element())
+            .unwrap();
+        factory_name(&peer)
+    }
+
+    #[test]
+    fn capture_queue_sits_between_videoflip_and_videorate() {
+        let pipeline = built_pipeline(|_| {});
+
+        let queue = pipeline.by_name("kooha-capture-queue").unwrap();
+        assert_eq!(queue_limits(&queue), (3, 0, 0));
+        assert_eq!(leaky_nick(&queue), "downstream");
+        assert_eq!(peer_factory(&queue, "sink"), "videoflip");
+        assert_eq!(peer_factory(&queue, "src"), "videorate");
+    }
+
+    #[test]
+    fn videoenc_queue_holds_thirty_buffers() {
+        let pipeline = built_pipeline(|_| {});
+
+        let queue = pipeline.by_name("kooha-videoenc-queue").unwrap();
+        assert_eq!(queue_limits(&queue), (30, 0, 0));
+        assert_eq!(leaky_nick(&queue), "no");
+    }
+
+    #[test]
+    fn capture_queue_counts_dropped_frames() {
+        gst::init().unwrap();
+
+        let (queue, dropped) = make_capture_queue().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        let pipeline = gst::Pipeline::new();
+        pipeline.add_many([&queue, &sink]).unwrap();
+        queue.link(&sink).unwrap();
+        pipeline.set_state(gst::State::Paused).unwrap();
+
+        let src = gst::Pad::builder(gst::PadDirection::Src).build();
+        src.set_active(true).unwrap();
+        src.link(&queue.static_pad("sink").unwrap()).unwrap();
+        src.push_event(gst::event::StreamStart::new("capture-queue-test"));
+        src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(
+            "video/x-raw",
+        )));
+        src.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+            gst::ClockTime,
+        >::new()));
+
+        // The first buffer reaches the sink, which holds it while paused, so
+        // the queue's thread stays blocked from then on.
+        src.push(gst::Buffer::new()).unwrap();
+        let start = std::time::Instant::now();
+        while queue.property::<u32>("current-level-buffers") > 0 {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+
+        // Three fill the queue; each of the other seven drops the oldest.
+        for _ in 0..10 {
+            src.push(gst::Buffer::new()).unwrap();
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 7);
+        assert_eq!(queue.property::<u32>("current-level-buffers"), 3);
+
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 }
