@@ -147,19 +147,27 @@ fn encoder_help(encoder: H264Encoder) -> ContextWithHelp {
 }
 
 /// The help for an error of the recording's pipeline posted by `src`, when
-/// `src` is the element that encodes with `encoder`, the pipeline's
-/// encoder. The probe runs at a fixed size for whole streams, so an encoder
-/// can still fail with the size of the real frames.
-///
-/// The converters and caps filters of the chain are left out: the pipeline
-/// has others, whose errors are not the encoder's (fable code r2 #3).
+/// `src` is an element of the chain of `encoder`, the pipeline's encoder.
+/// The probe runs at a fixed size for whole streams, so an encoder can
+/// still fail with the size of the real frames.
 fn encoder_error_help(
     encoder: Option<H264Encoder>,
     src: Option<&gst::Object>,
 ) -> Option<ContextWithHelp> {
     let encoder = encoder?;
     let factory = src?.downcast_ref::<gst::Element>()?.factory()?;
-    (factory.name() == encoder.encoder_element()).then(|| encoder_help(encoder))
+    is_encoders_own(encoder, &factory.name()).then(|| encoder_help(encoder))
+}
+
+/// Whether an error of an element made by `factory` is `encoder`'s: the
+/// element that encodes, or one that only its chain has, as `vapostproc` or
+/// `cudaupload` (fable code r3 #2). `videoconvert` and `capsfilter` are left
+/// out: the pipeline has others, whose errors are not the encoder's (fable
+/// code r2 #3).
+fn is_encoders_own(encoder: H264Encoder, factory: &str) -> bool {
+    factory == encoder.encoder_element()
+        || (encoder.required_elements().contains(&factory)
+            && !matches!(factory, "videoconvert" | "capsfilter"))
 }
 
 /// Whether recording in `mode` has to mark an area first: in Selection mode
@@ -1370,6 +1378,33 @@ mod tests {
         // A profile with no H.264 encoder, or no source.
         assert!(encoder_error_help(None, Some(&element("x264enc"))).is_none());
         assert!(encoder_error_help(Some(H264Encoder::Cpu), None).is_none());
+    }
+
+    #[test]
+    fn the_elements_whose_errors_are_the_encoders() {
+        for (encoder, factory, own) in [
+            (H264Encoder::Cpu, "x264enc", true),
+            (H264Encoder::Intel, "vah264lpenc", true),
+            (H264Encoder::Nvidia, "nvh264enc", true),
+            // Only in the chain of the encoder (fable code r3 #2).
+            (H264Encoder::Intel, "vapostproc", true),
+            (H264Encoder::Nvidia, "cudaupload", true),
+            (H264Encoder::Nvidia, "cudaconvert", true),
+            // Elsewhere in the pipeline too.
+            (H264Encoder::Cpu, "videoconvert", false),
+            (H264Encoder::Cpu, "capsfilter", false),
+            (H264Encoder::Intel, "videoconvert", false),
+            // Not in the chain of the encoder.
+            (H264Encoder::Intel, "x264enc", false),
+            (H264Encoder::Cpu, "cudaupload", false),
+            (H264Encoder::Cpu, "filesink", false),
+        ] {
+            assert_eq!(
+                is_encoders_own(encoder, factory),
+                own,
+                "{encoder:?} {factory}"
+            );
+        }
     }
 
     fn area_on(connector: &str, monitor: (i32, i32), scale: f64) -> MarkedArea {
