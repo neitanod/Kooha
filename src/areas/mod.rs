@@ -12,5 +12,5 @@ pub mod store;
 pub use self::{
     file::Selected,
     model::*,
-    store::{AreaStore, NameTaken},
+    store::{AreaStore, MissingArea, NameTaken},
 };

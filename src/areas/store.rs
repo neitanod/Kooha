@@ -22,6 +22,10 @@ use crate::i18n::gettext_f;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTaken(pub String);
 
+/// No saved area has the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingArea(pub String);
+
 /// What identifies one version of the file on disk. Every save renames a
 /// new file into place, so the inode changes even when two saves land in
 /// the same coarse modification time.
@@ -288,15 +292,24 @@ impl AreaStore {
         });
     }
 
-    /// Marks a saved area again: new geometry, same name and place.
-    pub fn replace_geometry(&self, name: &str, area: MarkedArea) {
+    /// Marks a saved area again: new geometry, same name and place. An
+    /// error if no area has the name any more, as when it was removed or
+    /// renamed while marking it.
+    pub fn replace_geometry(&self, name: &str, area: MarkedArea) -> Result<(), MissingArea> {
+        let mut missing = false;
         let _ = self.update(|file| {
             let Some(index) = find(file, name) else {
+                missing = true;
                 return Ok(false);
             };
             file.areas[index].area = area;
             Ok(true)
         });
+        if missing {
+            Err(MissingArea(name.to_string()))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn connect_changed<F>(&self, f: F) -> glib::SignalHandlerId
@@ -623,7 +636,7 @@ mod tests {
         store.save_named("Demo", area(100), false).unwrap();
         store.save_named("Other", area(1), false).unwrap();
 
-        store.replace_geometry("Demo", area(300));
+        store.replace_geometry("Demo", area(300)).unwrap();
 
         assert_eq!(names(&store), ["Demo", "Other"]);
         assert_eq!(store.areas()[0].area, area(300));
@@ -662,7 +675,7 @@ mod tests {
         assert_eq!(count.get(), 3);
         store.rename("Demo", "Talk").unwrap();
         assert_eq!(count.get(), 4);
-        store.replace_geometry("Talk", area(5));
+        store.replace_geometry("Talk", area(5)).unwrap();
         assert_eq!(count.get(), 5);
         store.remove("Talk");
         assert_eq!(count.get(), 6);
@@ -807,6 +820,42 @@ mod tests {
 
         let on_disk = file::load(&path).unwrap();
         assert_eq!(on_disk.areas.len(), 2 * SAVES);
+    }
+
+    #[test]
+    fn saving_without_replace_keeps_an_area_another_instance_saved() {
+        let dir = TempDir::new();
+        let first = AreaStore::with_path(dir.file());
+        let second = AreaStore::with_path(dir.file());
+        assert!(!second.contains("Demo"));
+        first.save_named("Demo", area(1), false).unwrap();
+
+        // `second` didn't know the name, so the dialog didn't ask.
+        assert_eq!(
+            second.save_named("Demo", area(2), false),
+            Err(NameTaken("Demo".into()))
+        );
+        assert_eq!(file::load(&dir.file()).unwrap().areas[0].area, area(1));
+
+        // Once the user confirms Replace.
+        second.save_named("Demo", area(2), true).unwrap();
+        assert_eq!(file::load(&dir.file()).unwrap().areas[0].area, area(2));
+    }
+
+    #[test]
+    fn replacing_the_geometry_of_a_missing_area_is_an_error() {
+        let dir = TempDir::new();
+        let store = AreaStore::with_path(dir.file());
+        store.save_named("Demo", area(100), false).unwrap();
+        let count = changes(&store);
+
+        assert_eq!(
+            store.replace_geometry("Gone", area(300)),
+            Err(MissingArea("Gone".into()))
+        );
+
+        assert_eq!(store.areas()[0].area, area(100));
+        assert_eq!(count.get(), 0);
     }
 
     #[test]

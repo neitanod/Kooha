@@ -10,8 +10,9 @@ use crate::{areas::MarkedArea, i18n::gettext_f};
 pub enum SaveChoice {
     /// Keep it as the last area, out of the list.
     Last,
-    /// Save it in the list with this name, replacing any area with it.
-    Named(String),
+    /// Save it in the list with this name. `replace` only when the user
+    /// confirmed replacing the area that has it.
+    Named { name: String, replace: bool },
     /// Mark it again.
     MarkAgain,
 }
@@ -27,24 +28,51 @@ enum Decision {
 }
 
 /// Asks whether to save `area` with a name. `name_exists` tells whether the
-/// saved list already has a name; when the user chose to replace it, the
-/// answer is `Named` and the caller saves with `replace = true`.
-// The window calls it after marking (chunk 5).
-#[allow(dead_code)]
+/// saved list already has a name; the answer is `Named` with `replace` set
+/// only if the user chose to replace the area of that name.
 pub async fn ask(
     parent: &impl IsA<gtk::Widget>,
     area: &MarkedArea,
     name_exists: impl Fn(&str) -> bool,
 ) -> SaveChoice {
+    ask_from(parent, area, name_exists, None).await
+}
+
+/// Asks again after saving as `taken` found the name taken, as when another
+/// Kooha saved it after the first question: whether to replace that area
+/// or to change the name.
+pub async fn ask_again(
+    parent: &impl IsA<gtk::Widget>,
+    area: &MarkedArea,
+    name_exists: impl Fn(&str) -> bool,
+    taken: String,
+) -> SaveChoice {
+    ask_from(parent, area, name_exists, Some(taken)).await
+}
+
+/// The questions, starting from the replace dialog for `taken` if given.
+async fn ask_from(
+    parent: &impl IsA<gtk::Widget>,
+    area: &MarkedArea,
+    name_exists: impl Fn(&str) -> bool,
+    mut taken: Option<String>,
+) -> SaveChoice {
     let mut name = String::new();
     loop {
-        let (dialog, entry_row) = save_dialog(area, &name);
-        if dialog.choose_future(Some(parent)).await == "remark" {
-            return SaveChoice::MarkAgain;
-        }
-        let text = entry_row.text();
+        let (text, exists) = match taken.take() {
+            Some(taken) => (taken, true),
+            None => {
+                let (dialog, entry_row) = save_dialog(area, &name);
+                if dialog.choose_future(Some(parent)).await == "remark" {
+                    return SaveChoice::MarkAgain;
+                }
+                let text = entry_row.text().to_string();
+                let exists = name_exists(text.trim());
+                (text, exists)
+            }
+        };
 
-        let decision = match choice_for(&text, name_exists(text.trim()), None) {
+        let decision = match choice_for(&text, exists, None) {
             Decision::AskReplace(taken) => {
                 let response = replace_dialog(&taken, area)
                     .choose_future(Some(parent))
@@ -68,7 +96,14 @@ fn choice_for(name: &str, exists: bool, replace_answer: Option<bool>) -> Decisio
         return Decision::Done(SaveChoice::Last);
     }
     match (exists, replace_answer) {
-        (false, _) | (true, Some(true)) => Decision::Done(SaveChoice::Named(name.to_string())),
+        (false, _) => Decision::Done(SaveChoice::Named {
+            name: name.to_string(),
+            replace: false,
+        }),
+        (true, Some(true)) => Decision::Done(SaveChoice::Named {
+            name: name.to_string(),
+            replace: true,
+        }),
         (true, None) => Decision::AskReplace(name.to_string()),
         (true, Some(false)) => Decision::EditName(name.to_string()),
     }
@@ -154,11 +189,20 @@ mod tests {
         );
     }
 
+    fn named(name: &str, replace: bool) -> SaveChoice {
+        SaveChoice::Named {
+            name: name.into(),
+            replace,
+        }
+    }
+
     #[test]
-    fn a_new_name_is_saved_trimmed() {
+    fn a_new_name_is_saved_trimmed_without_replacing() {
+        // If another Kooha saves the name meanwhile, saving fails rather
+        // than replacing its area (codex code r1 #2).
         assert_eq!(
             choice_for("  Demo ", false, None),
-            Decision::Done(SaveChoice::Named("Demo".into()))
+            Decision::Done(named("Demo", false))
         );
     }
 
@@ -170,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             choice_for("Demo", true, Some(true)),
-            Decision::Done(SaveChoice::Named("Demo".into()))
+            Decision::Done(named("Demo", true))
         );
         assert_eq!(
             choice_for("Demo", true, Some(false)),

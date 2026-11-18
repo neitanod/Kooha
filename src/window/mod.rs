@@ -26,13 +26,14 @@ use crate::{
         self,
         save_dialog::{self, SaveChoice},
     },
-    areas::{self, MarkedArea},
+    areas::{self, MarkedArea, NameTaken},
     camera_pip::{self, devices::CameraSource},
     cancelled::Cancelled,
     capture_warnings::{CaptureWarnings, WarningsNotifier},
     config::PROFILE,
     format,
     help::ContextWithHelp,
+    i18n::gettext_f,
     overlay,
     preferences_dialog::PreferencesDialog,
     recording::{
@@ -59,8 +60,18 @@ pub enum MarkTarget {
 pub type Marker =
     Rc<dyn Fn(Option<MarkedArea>) -> Pin<Box<dyn Future<Output = Result<MarkedArea>>>>>;
 
+/// Asks what to do with a marked area, as `save_dialog` does: with a name,
+/// again after saving as that name found it taken. Tests replace
+/// `save_dialog` with it.
+pub type SaveAsker =
+    Rc<dyn Fn(MarkedArea, Option<String>) -> Pin<Box<dyn Future<Output = SaveChoice>>>>;
+
+/// What tests put in place of the marker and of the save dialog.
 #[derive(Default)]
-struct MarkerHook(Option<Marker>);
+struct TestHooks {
+    marker: Option<Marker>,
+    save_asker: Option<SaveAsker>,
+}
 
 /// The area border on screen, with what it was built from.
 #[derive(Debug)]
@@ -71,10 +82,11 @@ struct ShownBorder {
     connector: Option<String>,
 }
 
-impl fmt::Debug for MarkerHook {
+impl fmt::Debug for TestHooks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("MarkerHook")
-            .field(&self.0.is_some())
+        f.debug_struct("TestHooks")
+            .field("marker", &self.marker.is_some())
+            .field("save_asker", &self.save_asker.is_some())
             .finish()
     }
 }
@@ -140,7 +152,7 @@ mod imp {
         pub(super) updating_area_dropdown: Cell<bool>,
         /// An area is being marked.
         pub(super) marking: Cell<bool>,
-        pub(super) marker: RefCell<MarkerHook>,
+        pub(super) hooks: RefCell<TestHooks>,
     }
 
     #[glib::object_subclass]
@@ -317,26 +329,32 @@ impl Window {
         match target {
             MarkTarget::New => {
                 let mut initial = store.selected_area().map(|chosen| chosen.area);
-                loop {
+                'mark: loop {
                     let area = self.run_marker(initial.take()).await?;
 
-                    // The dialog goes on the window, which may be minimized
-                    // if the marking came from the tray.
-                    self.present();
-                    match save_dialog::ask(self, &area, |name| store.contains(name)).await {
-                        SaveChoice::Last => store.set_last(area.clone()),
-                        SaveChoice::Named(name) => {
-                            // The dialog already asked whether to replace it.
-                            if let Err(err) = store.save_named(&name, area.clone(), true) {
-                                tracing::error!("Failed to save area: {:?}", err);
+                    let mut choice = self.ask_save(&area, None).await;
+                    loop {
+                        match choice {
+                            SaveChoice::Last => store.set_last(area.clone()),
+                            // Replaces only what the user agreed to replace
+                            // (codex code r1 #2).
+                            SaveChoice::Named { name, replace } => {
+                                if let Err(NameTaken(taken)) =
+                                    store.save_named(&name, area.clone(), replace)
+                                {
+                                    // Another Kooha saved the name after
+                                    // the dialog checked it.
+                                    choice = self.ask_save(&area, Some(taken)).await;
+                                    continue;
+                                }
+                            }
+                            SaveChoice::MarkAgain => {
+                                initial = Some(area);
+                                continue 'mark;
                             }
                         }
-                        SaveChoice::MarkAgain => {
-                            initial = Some(area);
-                            continue;
-                        }
+                        return Some(area);
                     }
-                    return Some(area);
                 }
             }
             MarkTarget::Replace(name) => {
@@ -345,15 +363,39 @@ impl Window {
                     return None;
                 };
                 let area = self.run_marker(Some(saved.area)).await?;
-                store.replace_geometry(&name, area.clone());
+                if store.replace_geometry(&name, area.clone()).is_err() {
+                    // Removed or renamed while marking: the new geometry
+                    // stays, as the last area (fable code r1 #16).
+                    store.set_last(area.clone());
+                    self.add_toast(adw::Toast::new(&missing_area_notice(&name)));
+                }
                 Some(area)
             }
         }
     }
 
+    /// What to do with the marked `area`; with `taken`, after saving it as
+    /// that name found the name taken.
+    async fn ask_save(&self, area: &MarkedArea, taken: Option<String>) -> SaveChoice {
+        let asker = self.imp().hooks.borrow().save_asker.clone();
+        if let Some(asker) = asker {
+            return asker(area.clone(), taken).await;
+        }
+
+        // The dialog goes on the window, which may be minimized if the
+        // marking came from the tray.
+        self.present();
+        let store = Application::get().area_store();
+        let name_exists = |name: &str| store.contains(name);
+        match taken {
+            None => save_dialog::ask(self, area, name_exists).await,
+            Some(taken) => save_dialog::ask_again(self, area, name_exists, taken).await,
+        }
+    }
+
     /// The area marked on the screen, or `None` if cancelled or failed.
     async fn run_marker(&self, initial: Option<MarkedArea>) -> Option<MarkedArea> {
-        let marker = self.imp().marker.borrow().0.clone();
+        let marker = self.imp().hooks.borrow().marker.clone();
         let result = match marker {
             Some(marker) => marker(initial).await,
             None => area_marker::mark(initial).await,
@@ -374,8 +416,13 @@ impl Window {
     }
 
     #[cfg(test)]
-    fn set_marker(&self, marker: Marker) {
-        self.imp().marker.replace(MarkerHook(Some(marker)));
+    pub(crate) fn set_marker(&self, marker: Marker) {
+        self.imp().hooks.borrow_mut().marker = Some(marker);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_save_asker(&self, asker: SaveAsker) {
+        self.imp().hooks.borrow_mut().save_asker = Some(asker);
     }
 
     /// Returns `true` if the window is busy with a recording.
@@ -1262,6 +1309,15 @@ impl Window {
     }
 }
 
+/// The toast when a saved area marked again was removed or renamed
+/// meanwhile.
+fn missing_area_notice(name: &str) -> String {
+    gettext_f(
+        "The area “{name}” is gone; the new one is the last area",
+        &[("name", name)],
+    )
+}
+
 /// A saved area out of date is marked again with its name; the last area
 /// is marked anew.
 fn stale_area_target(stale: &StaleArea) -> MarkTarget {
@@ -1743,6 +1799,126 @@ mod tests {
             Some(area(200))
         );
         assert_eq!(markings.get(), 1);
+    }
+
+    /// A save dialog that answers `answers` in order, and records whether
+    /// each question was about a taken name.
+    fn answer_save_dialog(
+        window: &Window,
+        answers: Vec<SaveChoice>,
+    ) -> Rc<RefCell<Vec<Option<String>>>> {
+        let questions = Rc::new(RefCell::new(Vec::new()));
+        let answers = RefCell::new(answers.into_iter());
+        window.set_save_asker(Rc::new(clone!(
+            #[strong]
+            questions,
+            move |_, taken| {
+                questions.borrow_mut().push(taken);
+                let answer = answers.borrow_mut().next().expect("asked once more");
+                Box::pin(async move { answer })
+            }
+        )));
+        questions
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn a_name_taken_meanwhile_asks_again_before_replacing() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        window.set_marker(Rc::new(|_| Box::pin(async { Ok(area(200)) })));
+        let questions = answer_save_dialog(
+            &window,
+            vec![
+                SaveChoice::Named {
+                    name: "Demo".into(),
+                    replace: false,
+                },
+                SaveChoice::Named {
+                    name: "Demo".into(),
+                    replace: true,
+                },
+            ],
+        );
+        // Another Kooha saves «Demo» after the dialog checked the name.
+        let other = areas::AreaStore::with_path(store.path().to_path_buf());
+        other.save_named("Demo", area(100), false).unwrap();
+
+        let marked = window.mark_area(MarkTarget::New).await;
+
+        assert_eq!(marked, Some(area(200)));
+        assert_eq!(*questions.borrow(), [None, Some("Demo".to_string())]);
+        assert_eq!(store.areas().len(), 1);
+        assert_eq!(store.areas()[0].area, area(200));
+        assert_eq!(store.selected(), Some(Selected::Named("Demo".into())));
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn a_name_taken_meanwhile_can_keep_the_other_area() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        window.set_marker(Rc::new(|_| Box::pin(async { Ok(area(200)) })));
+        answer_save_dialog(
+            &window,
+            vec![
+                SaveChoice::Named {
+                    name: "Demo".into(),
+                    replace: false,
+                },
+                // «Change Name», then another name.
+                SaveChoice::Named {
+                    name: "Talk".into(),
+                    replace: false,
+                },
+            ],
+        );
+        let other = areas::AreaStore::with_path(store.path().to_path_buf());
+        other.save_named("Demo", area(100), false).unwrap();
+
+        window.mark_area(MarkTarget::New).await;
+
+        let saved = store.areas();
+        assert_eq!(saved.len(), 2);
+        assert_eq!((saved[0].name.as_str(), &saved[0].area), ("Demo", &area(100)));
+        assert_eq!((saved[1].name.as_str(), &saved[1].area), ("Talk", &area(200)));
+    }
+
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn remarking_an_area_removed_meanwhile_keeps_it_as_the_last_one() {
+        let _lock = crate::settings::test_utils::settings_lock();
+        let window = test_window();
+        let store = Application::get().area_store();
+        store.save_named("Demo", area(100), false).unwrap();
+        // The Areas window removes it while the marking is open.
+        window.set_marker(Rc::new(|_| {
+            Application::get().area_store().remove("Demo");
+            Box::pin(async { Ok(area(200)) })
+        }));
+
+        let marked = window.mark_area(MarkTarget::Replace("Demo".into())).await;
+
+        assert_eq!(marked, Some(area(200)));
+        assert!(store.areas().is_empty());
+        assert_eq!(store.last(), Some(area(200)));
+        assert_eq!(store.selected(), Some(Selected::Last));
+    }
+
+    #[test]
+    fn missing_area_notice_names_it() {
+        assert_eq!(
+            missing_area_notice("Demo"),
+            "The area “Demo” is gone; the new one is the last area"
+        );
     }
 
     #[gtk::test]
