@@ -38,6 +38,15 @@ pub fn set_control(path: &Path, id: u32, value: i32) -> io::Result<()> {
     control_ioctl(&open(path)?, VIDIOC_S_CTRL, &mut control)
 }
 
+/// The device node of a camera path, if it is a V4L2 node. Other paths,
+/// such as the display name a device without a path gets as its id, are
+/// never opened.
+pub fn video_node(path: &str) -> Option<&Path> {
+    let number = path.strip_prefix("/dev/video")?;
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| Path::new(path))
+}
+
 /// Opens the node without waiting for a frame, as V4L2 tools do.
 fn open(path: &Path) -> io::Result<File> {
     OpenOptions::new()
@@ -90,6 +99,17 @@ mod tests {
         let null = Path::new("/dev/null");
         assert!(get_control(null, EXPOSURE_DYNAMIC_FRAMERATE).is_err());
         assert!(set_control(null, EXPOSURE_DYNAMIC_FRAMERATE, 0).is_err());
+    }
+
+    #[test]
+    fn only_video_nodes_are_opened() {
+        assert_eq!(video_node("/dev/video0"), Some(Path::new("/dev/video0")));
+        assert_eq!(video_node("/dev/video12"), Some(Path::new("/dev/video12")));
+        assert_eq!(video_node(""), None);
+        assert_eq!(video_node("/dev/null"), None);
+        assert_eq!(video_node("/dev/video"), None);
+        assert_eq!(video_node("/dev/video0/../sda"), None);
+        assert_eq!(video_node("Integrated Camera"), None);
     }
 
     #[test]
