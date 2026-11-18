@@ -198,11 +198,15 @@ impl<E, S> Default for Probes<E, S> {
 #[derive(Debug)]
 struct InFlight<S> {
     id: u64,
+    /// When its thread was launched.
+    started: Instant,
     /// The requests waiting for it. Each gets the size probed with the
     /// result, as one of another size probes its own after it.
     waiting: Vec<oneshot::Sender<(S, Result<(), String>)>>,
-    /// A request timed out waiting for it: the thread may be stuck in the
-    /// driver, so the next requests time out at once (fable code r2 #5).
+    /// A request timed out after waiting for it its whole timeout: the
+    /// thread may be stuck in the driver, so the next requests time out at
+    /// once (fable code r2 #5). A request that launched it late in its own
+    /// timeout says nothing about it (fable code r3 #3).
     stuck: bool,
 }
 
@@ -231,7 +235,7 @@ impl ProbeError {
 /// it runs, a new request for the same encoder launches no other thread: of
 /// the same size, it gets the result of the running one; of another size,
 /// it launches its own once the running one ends. After a request timed out
-/// waiting for it, the next ones time out at once. When it ends, its result
+/// with it running for `timeout` at least, the next ones time out at once. When it ends, its result
 /// is cached, unless it timed out itself.
 async fn cached<E, S, F>(
     cache: &'static ProbeCache<E, S>,
@@ -275,6 +279,7 @@ where
                     encoder.clone(),
                     InFlight {
                         id: next_id,
+                        started: Instant::now(),
                         waiting: vec![sender],
                         stuck: false,
                     },
@@ -310,7 +315,9 @@ where
                 if let Some(in_flight) = probes.in_flight.get_mut(&encoder)
                     && in_flight.id == id
                 {
-                    in_flight.stuck = true;
+                    if in_flight.started.elapsed() >= timeout {
+                        in_flight.stuck = true;
+                    }
                     // Those that gave up, this one among them.
                     in_flight.waiting.retain(|sender| !sender.is_canceled());
                 }
@@ -717,6 +724,64 @@ mod tests {
         let probes = lock(cache);
         assert_eq!(probes.results[&("key", 0)], Ok(()));
         assert_eq!(probes.results[&("key", 1)], Err("too big".to_string()));
+    }
+
+    #[test]
+    fn a_probe_launched_late_in_a_request_is_not_stuck() {
+        const TIMEOUT: Duration = Duration::from_millis(400);
+        let cache = new_cache();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (release, released) = mpsc::channel();
+        let released = Arc::new(Mutex::new(released));
+
+        let first = std::thread::spawn({
+            let probe = stuck_probe(&runs, &released);
+            move || block_on(cached(cache, "key", 0, Duration::from_secs(5), probe))
+        });
+        wait_for_runs(&runs, 1);
+
+        // Another size waits for the first probe almost all its timeout,
+        // launches its own and times out 50 ms later (fable code r3 #3).
+        let start = Instant::now();
+        let sender = std::thread::spawn({
+            let release = release.clone();
+            move || {
+                std::thread::sleep(TIMEOUT - Duration::from_millis(50));
+                release.send(Ok(())).unwrap();
+            }
+        });
+        let (result, elapsed) = timed(cached(
+            cache,
+            "key",
+            1,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
+        sender.join().unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert!(result.unwrap_err().contains("did not answer"));
+        // What is left of the timeout counts whole milliseconds.
+        assert!(elapsed >= TIMEOUT - Duration::from_millis(2), "{elapsed:?}");
+        assert!(start.elapsed() < TIMEOUT * 2, "{:?}", start.elapsed());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+
+        // Its probe ran 50 ms only: the next request waits for it.
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            release.send(Ok(())).unwrap();
+        });
+        let (result, elapsed) = timed(cached(
+            cache,
+            "key",
+            1,
+            TIMEOUT,
+            stuck_probe(&runs, &released),
+        ));
+        sender.join().unwrap();
+        assert_eq!(result, Ok(()));
+        assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
+        assert!(elapsed < TIMEOUT, "{elapsed:?}");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]
