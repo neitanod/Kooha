@@ -83,7 +83,7 @@ de ayuda arriba y al centro: «Arrastrá para marcar · Enter confirma · Esc ca
   confirma). **Escape** cancela y deja el área elegida como estaba. El botón derecho del mouse
   también cancela.
 - Ancho y alto se redondean a números pares, porque el codificador H.264 los exige; la
-  etiqueta muestra el valor redondeado. Mínimo 64×64 píxeles físicos.
+  etiqueta muestra el valor redondeado. Mínimo 160×120 píxeles físicos, porque `nvh264enc` no acepta menos de 160 de ancho.
 
 **Al confirmar (P4).** Las capas de marcado se cierran y aparece un diálogo chico de Kooha:
 «Área de 1280×720 en DP-3», con un campo «Guardar como…» optativo y el botón «Listo».
@@ -142,14 +142,13 @@ de GDK.
 ## 3 · Borde del área elegida y grabación
 
 **Borde (P8).** El borde punteado de la Task 1088 (`src/area_border/`) se muestra alrededor del
-área elegida, en su monitor, desde que se elige, mientras Kooha está en modo Selección y la
-opción de mostrar el borde está prendida; durante la grabación sigue como hoy. Se oculta y se
-vuelve a mostrar con:
+área elegida, en su monitor, desde que se elige y mientras Kooha está en modo Selección; durante
+la cuenta regresiva, la grabación y la pausa sigue como hoy. Hoy no hay opción para apagarlo: se
+agrega la clave `show-area-border` (prendida por defecto), que vale para antes y durante la
+grabación, y persiste. Se alterna con:
 - el atajo `Ctrl+B` en la ventana principal;
 - el ítem «Mostrar borde del área» (casilla) de la bandeja;
 - un botón con un ícono de ojo en la fila del desplegable.
-La elección de ocultarlo persiste (clave nueva `show-area-border-idle`, prendida por defecto)
-y no afecta al borde durante la grabación, que sigue gobernado por la opción existente.
 Con el área desactualizada, el borde no se muestra.
 
 **Grabar con el área elegida (P9, ADR 0005).**
@@ -204,8 +203,10 @@ opción no disponible se muestra deshabilitada con el motivo («`vah264lpenc` no
 - CPU: el `x264enc` de hoy.
 - Automático: el orden lo fija la medición; Intel primero si su rendimiento a 60 FPS alcanza,
   porque gasta menos batería (decisión a confirmar con los números).
-- Si el codificador por hardware falla al arrancar (error del elemento en el paso a PLAYING),
-  Automático reintenta con el siguiente sin que el usuario vea nada salvo el log.
+- Antes de la primera grabación de la sesión, Kooha prueba cada codificador candidato con un
+  pipeline mínimo (`videotestsrc num-buffers=2 ! <cadena> ! fakesink`) y recuerda el resultado.
+  Automático usa el primero que pasó la prueba; así una placa que no arranca nunca llega a la
+  grabación. El resultado y el motivo de cada falla van al log.
 
 **DMA-BUF (P12).** Con codificador Intel o NVIDIA, la fuente negocia `memory:DMABuf` con
 PipeWire y el recorte se hace en el elemento de la GPU (`vapostproc` o `cudaconvert`) en vez de
