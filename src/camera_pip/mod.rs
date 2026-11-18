@@ -427,6 +427,12 @@ impl CameraPip {
     fn destroy_window(&self) {
         let imp = self.imp();
 
+        // A drag cancelled by the window going away never emits `drag-end`
+        // (fable code r2 NIT).
+        if let Some(tick_id) = imp.drag_tick.take() {
+            tick_id.remove();
+        }
+
         if let Some(window) = imp.window.take() {
             window.set_child(None::<&gtk::Widget>);
             window.destroy();
@@ -537,13 +543,60 @@ impl CameraPip {
 
         let size = self.view().size();
         let monitor_size = monitor_size(&monitor);
-        let position = imp
-            .drag
-            .borrow_mut()
-            .frame_position(|position| clamp_position(position, size, monitor_size));
-        if let Some(position) = position {
+        let monitors = monitors();
+        let rects = monitors
+            .iter()
+            .map(|(_, monitor)| {
+                let geometry = monitor.geometry();
+                (
+                    geometry.x(),
+                    geometry.y(),
+                    geometry.width(),
+                    geometry.height(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let current = monitors.iter().position(|(_, other)| *other == monitor);
+
+        let mut crossing = None;
+        let position = imp.drag.borrow_mut().frame_position(|position| {
+            crossing =
+                current.and_then(|current| monitor_crossing(position, size, current, &rects));
+            clamp_position(position, size, monitor_size)
+        });
+
+        if let Some((index, position)) = crossing {
+            let (connector, monitor) = &monitors[index];
+            self.move_while_dragging(connector.as_deref(), monitor, position);
+        } else if let Some(position) = position {
             imp.position.set(position);
             place(&window, position);
+        }
+    }
+
+    /// Moves the dragged `PiP` over to `monitor`, at `position` on it. The
+    /// layer surface is recreated there, which ends the drag: the user picks
+    /// the `PiP` up again on the new monitor.
+    fn move_while_dragging(
+        &self,
+        connector: Option<&str>,
+        monitor: &gdk::Monitor,
+        position: (i32, i32),
+    ) {
+        let imp = self.imp();
+
+        if let Some(tick_id) = imp.drag_tick.take() {
+            tick_id.remove();
+        }
+        imp.position.set(position);
+
+        // `show_on` places the PiP at the saved position, so save it first.
+        let settings = self.settings();
+        settings.set_camera_position(position);
+        match connector {
+            // Following `camera-monitor` recreates the surface on `monitor`.
+            Some(connector) => settings.set_camera_monitor(connector),
+            None => self.show_on(monitor),
         }
     }
 
@@ -1053,6 +1106,40 @@ pub fn after_monitors_changed<M: Clone + PartialEq>(
     .map_or(MonitorAction::TurnOff, MonitorAction::MoveTo)
 }
 
+/// Where a dragged `PiP` goes when its center leaves its monitor for
+/// another one: a layer surface lives on one monitor, so it cannot be
+/// dragged across, and has to be moved over instead.
+///
+/// `position` is the unclamped top-left of the `PiP` on `monitors[current]`,
+/// and every monitor is its logical rectangle `(x, y, width, height)`.
+/// Returns the index of the monitor that now holds the center, and the
+/// top-left on it, clamped to fit; `None` while the center stays on the
+/// current monitor or falls where no monitor is.
+pub fn monitor_crossing(
+    position: (i32, i32),
+    pip: (i32, i32),
+    current: usize,
+    monitors: &[(i32, i32, i32, i32)],
+) -> Option<(usize, (i32, i32))> {
+    let &(origin_x, origin_y, ..) = monitors.get(current)?;
+    let top_left = (origin_x + position.0, origin_y + position.1);
+    let center = (top_left.0 + pip.0 / 2, top_left.1 + pip.1 / 2);
+
+    let contains = |&(x, y, width, height): &(i32, i32, i32, i32)| {
+        (x..x + width).contains(&center.0) && (y..y + height).contains(&center.1)
+    };
+    if contains(&monitors[current]) {
+        return None;
+    }
+
+    let (index, &(x, y, width, height)) = monitors
+        .iter()
+        .enumerate()
+        .find(|(_, monitor)| contains(monitor))?;
+    let local = clamp_position((top_left.0 - x, top_left.1 - y), pip, (width, height));
+    Some((index, local))
+}
+
 /// The `PiP` position after a drag update. The surface moves with the
 /// pointer, so `offset` is relative to the already moved surface.
 pub fn drag_step(current: (i32, i32), offset: (f64, f64)) -> (i32, i32) {
@@ -1325,6 +1412,51 @@ mod tests {
         // to it.
         tracker.update((-10.0, 0.0));
         assert_eq!(tracker.frame_position(clamp), Some((490, 100)));
+    }
+
+    // Sebastián's layout (`kscreen-doctor -o`, 17/11/2026), as logical
+    // rectangles: HDMI-A-5 on top, eDP-1 below it, DP-3 to the right.
+    const HDMI: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+    const EDP: (i32, i32, i32, i32) = (457, 1080, 1463, 915);
+    const DP: (i32, i32, i32, i32) = (1920, 454, 1600, 1000);
+
+    #[test]
+    fn crossing_up_moves_to_the_monitor_above() {
+        // A 200×200 PiP dragged from eDP-1 to 150 px above its top edge:
+        // its center (local y = -150 + 100) is now inside HDMI-A-5.
+        let crossing = monitor_crossing((400, -150), (200, 200), 1, &[HDMI, EDP, DP]);
+
+        // Global top-left (857, 930) is local (857, 930) on HDMI-A-5,
+        // clamped so the whole PiP fits: y = 1080 - 200.
+        assert_eq!(crossing, Some((0, (857, 880))));
+    }
+
+    #[test]
+    fn crossing_right_moves_to_the_monitor_beside() {
+        // From HDMI-A-5 past its right edge, at a height DP-3 covers.
+        let crossing = monitor_crossing((1850, 600), (200, 200), 0, &[HDMI, EDP, DP]);
+
+        // Global (1850, 600) is local (-70, 146) on DP-3, clamped to x = 0.
+        assert_eq!(crossing, Some((2, (0, 146))));
+    }
+
+    #[test]
+    fn no_crossing_while_the_center_stays_home() {
+        // Partly past the top edge of eDP-1, but the center is still on it.
+        assert_eq!(
+            monitor_crossing((400, -50), (200, 200), 1, &[HDMI, EDP, DP]),
+            None
+        );
+    }
+
+    #[test]
+    fn no_crossing_into_empty_space() {
+        // Past the left edge of eDP-1, where no monitor is: it stays put,
+        // and the caller clamps it to its own monitor.
+        assert_eq!(
+            monitor_crossing((-300, 400), (200, 200), 1, &[HDMI, EDP, DP]),
+            None
+        );
     }
 
     #[test]
