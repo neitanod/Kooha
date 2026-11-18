@@ -315,7 +315,9 @@ pub(crate) fn match_stream(
 /// Opens a screencast session for `area`: if the shared stream is another
 /// monitor, closes that session, forgets the restore token, tells the user
 /// which monitor to choose with `notice`, and opens a second one without
-/// the token. A second mismatch is a `WrongMonitor` error. The restore
+/// the token. Once the second one answers, `withdraw_notice` takes the
+/// notice back, as it could show in the video (fable code r2 #2). A second
+/// mismatch is a `WrongMonitor` error. The restore
 /// token is saved with `save_token` only for a session that is kept.
 ///
 /// `open` and `close` stand for the portal, so that tests need no D-Bus.
@@ -328,6 +330,7 @@ pub(crate) async fn open_session_for_area<S, OpenFut, CloseFut>(
     close: impl Fn(S) -> CloseFut,
     forget_token: impl Fn(),
     notice: impl Fn(String),
+    withdraw_notice: impl Fn(),
     save_token: impl Fn(Option<String>),
 ) -> Result<(S, Vec<Stream>)>
 where
@@ -348,7 +351,9 @@ where
             &[("connector", &area.connector)],
         ));
 
-        (session, streams, new_token) = open(None).await?;
+        let reopened = open(None).await;
+        withdraw_notice();
+        (session, streams, new_token) = reopened?;
         if let StreamMatch::Other { shared } = match_stream(&streams, area, monitors) {
             close(session).await;
             return Err(WrongMonitor {
@@ -575,6 +580,7 @@ impl Recording {
                 },
                 || settings.reset_screencast_restore_token(),
                 |message| self.emit_notice(&message),
+                || Application::get().withdraw_notification("recording-notice"),
                 |restore_token| {
                     settings.set_screencast_restore_token(&restore_token.unwrap_or_default());
                 },
@@ -1585,6 +1591,7 @@ mod tests {
             },
             || events.borrow_mut().push("forget".to_string()),
             |message| events.borrow_mut().push(format!("notice {message}")),
+            || events.borrow_mut().push("withdraw notice".to_string()),
             |token| events.borrow_mut().push(format!("save {token:?}")),
         )
         .await
@@ -1624,6 +1631,9 @@ mod tests {
                 "forget",
                 "notice Choose DP-3 (whole screen) in the sharing dialog",
                 "open None",
+                // Before the recording starts: it could show in the video
+                // (fable code r2 #2).
+                "withdraw notice",
                 r#"save Some("t2")"#,
             ]
         );
@@ -1654,6 +1664,7 @@ mod tests {
                 "forget",
                 "notice Choose DP-3 (whole screen) in the sharing dialog",
                 "open None",
+                "withdraw notice",
                 "close 2",
             ]
         );
