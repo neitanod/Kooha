@@ -49,6 +49,8 @@ window.kooha-area-marker .help {
 pub enum LayerEvent {
     /// A press of the primary button anywhere on the layer.
     Pressed,
+    /// The pointer came into the layer.
+    PointerEntered,
     /// A key the layer did not use itself (Escape, Enter, the arrows).
     Key { key: gdk::Key, shift: bool },
     /// The secondary button.
@@ -130,7 +132,8 @@ impl MarkerLayer {
             .build();
         overlay::init_overlay(&window, monitor, LAYER_NAMESPACE);
         overlay::anchor_all_edges(&window);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        // The marker gives the keyboard to one layer.
+        window.set_keyboard_mode(KeyboardMode::None);
 
         let bounds = monitor::physical_size(&info);
         let inner = Rc::new(Inner {
@@ -151,6 +154,7 @@ impl MarkerLayer {
         Self(inner)
     }
 
+    #[cfg(test)]
     pub fn state(&self) -> MarkState {
         self.0.state.borrow().clone()
     }
@@ -178,14 +182,20 @@ impl MarkerLayer {
         self.0.update(false);
     }
 
-    /// Asks the compositor for the keyboard (Exclusive) or lets it go to
-    /// the layer the user picks (`OnDemand`).
+    /// Takes the keyboard (Exclusive) or gives it up (None). The protocol
+    /// has no way to ask for the focus, so only one layer at a time takes
+    /// it.
     pub fn set_keyboard(&self, exclusive: bool) {
         self.0.window.set_keyboard_mode(if exclusive {
             KeyboardMode::Exclusive
         } else {
-            KeyboardMode::OnDemand
+            KeyboardMode::None
         });
+    }
+
+    #[cfg(test)]
+    pub fn has_keyboard(&self) -> bool {
+        self.0.window.keyboard_mode() == KeyboardMode::Exclusive
     }
 
     pub fn present(&self) {
@@ -289,6 +299,7 @@ impl Inner {
         pointer.connect_enter(with(&weak, |this, _: &gtk::EventControllerMotion, _, _| {
             this.has_pointer.set(true);
             this.help.set_visible(true);
+            (this.events)(LayerEvent::PointerEntered);
         }));
         pointer.connect_leave(glib::clone!(
             #[strong]
