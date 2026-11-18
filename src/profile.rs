@@ -402,8 +402,14 @@ mod tests {
 
         profile
             .attach_with(&pipeline, &video_src, Some(&audio_src), &sink, encoder)
-            .unwrap_or_else(|err| panic!("can't attach `{}` with {encoder:?}: {err:?}", profile.id()));
-        assert!(pipeline.find_unlinked_pad(gst::PadDirection::Sink).is_none());
+            .unwrap_or_else(|err| {
+                panic!("can't attach `{}` with {encoder:?}: {err:?}", profile.id())
+            });
+        assert!(
+            pipeline
+                .find_unlinked_pad(gst::PadDirection::Sink)
+                .is_none()
+        );
         assert!(pipeline.find_unlinked_pad(gst::PadDirection::Src).is_none());
         pipeline
     }
@@ -432,7 +438,10 @@ mod tests {
 
                 let pipeline = attach_with(profile, encoder);
                 for element in encoder.required_elements() {
-                    assert!(has_element(&pipeline, element), "{id} {encoder:?} {element}");
+                    assert!(
+                        has_element(&pipeline, element),
+                        "{id} {encoder:?} {element}"
+                    );
                 }
                 assert!(has_element(&pipeline, "h264parse"));
             }

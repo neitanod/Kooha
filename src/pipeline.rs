@@ -116,10 +116,12 @@ impl PipelineBuilder {
         }
 
         // The compositor puts the streams side by side.
-        self.streams.iter().try_fold((0, 0), |(width, height), stream| {
-            let (stream_width, stream_height) = stream.size()?;
-            Some((width + stream_width, height.max(stream_height)))
-        })
+        self.streams
+            .iter()
+            .try_fold((0, 0), |(width, height), stream| {
+                let (stream_width, stream_height) = stream.size()?;
+                Some((width + stream_width, height.max(stream_height)))
+            })
     }
 
     /// Builds the pipeline.
@@ -1044,10 +1046,7 @@ mod test {
             builder_for(&[Some((1920, 1080)), Some((2560, 1600))]).output_size(),
             Some((4480, 1600))
         );
-        assert_eq!(
-            builder_for(&[Some((1920, 1080)), None]).output_size(),
-            None
-        );
+        assert_eq!(builder_for(&[Some((1920, 1080)), None]).output_size(), None);
     }
 
     #[test]

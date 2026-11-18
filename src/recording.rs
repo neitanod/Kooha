@@ -1301,7 +1301,9 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.to_string(), "The Intel encoder is not working");
         assert_eq!(
-            err.downcast_ref::<ContextWithHelp>().unwrap().help_message(),
+            err.downcast_ref::<ContextWithHelp>()
+                .unwrap()
+                .help_message(),
             "Choose Automatic or CPU in Preferences."
         );
         assert!(format!("{err:?}").contains("Intel has no device"));

@@ -24,7 +24,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// docs/perf/2026-11-18-capture-bench.md: NVIDIA kept 60 FPS with the least
 /// CPU, and Intel kept 60 FPS only with the CPU conversion to NV12. The run
 /// with the KDE portal confirms or changes it.
-pub const AUTO_ORDER: [H264Encoder; 3] = [H264Encoder::Nvidia, H264Encoder::Intel, H264Encoder::Cpu];
+pub const AUTO_ORDER: [H264Encoder; 3] =
+    [H264Encoder::Nvidia, H264Encoder::Intel, H264Encoder::Cpu];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum H264Encoder {
@@ -97,7 +98,7 @@ impl H264Encoder {
     /// Runs `chain` on two test frames of the recording's output `size`.
     /// Results are cached per encoder and size, except a timeout.
     pub async fn works(self, size: (i32, i32)) -> Result<(), String> {
-        static CACHE: LazyLock<Mutex<HashMap<(H264Encoder, (i32, i32)), Result<(), String>>>> =
+        static CACHE: LazyLock<ProbeCache<(H264Encoder, (i32, i32))>> =
             LazyLock::new(Mutex::default);
 
         let result = cached(&CACHE, (self, size), || self.probe(size)).await;
@@ -154,6 +155,9 @@ where
     Err(last_reason)
 }
 
+/// The result of each probe that did not time out.
+type ProbeCache<K> = Mutex<HashMap<K, Result<(), String>>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProbeError {
     Failed(String),
@@ -174,11 +178,7 @@ impl ProbeError {
 
 /// Returns the cached result for `key`, or runs `probe` and caches its result
 /// unless it timed out.
-async fn cached<K, F, Fut>(
-    cache: &Mutex<HashMap<K, Result<(), String>>>,
-    key: K,
-    probe: F,
-) -> Result<(), String>
+async fn cached<K, F, Fut>(cache: &ProbeCache<K>, key: K, probe: F) -> Result<(), String>
 where
     K: Eq + Hash,
     F: FnOnce() -> Fut,
@@ -226,22 +226,20 @@ fn play_until_end(description: &str, timeout: Duration) -> Result<(), ProbeError
         // The reason is on the bus.
         gst::ClockTime::ZERO
     };
-    let result = match bus.timed_pop_filtered(
-        wait,
-        &[gst::MessageType::Eos, gst::MessageType::Error],
-    ) {
-        Some(message) => match message.view() {
-            gst::MessageView::Error(err) => Err(ProbeError::Failed(match err.debug() {
-                Some(debug) => format!("{} ({debug})", err.error()),
-                None => err.error().to_string(),
-            })),
-            _ => Ok(()),
-        },
-        None if wait == gst::ClockTime::ZERO => Err(ProbeError::Failed(
-            "The pipeline failed to start".to_string(),
-        )),
-        None => Err(ProbeError::TimedOut),
-    };
+    let result =
+        match bus.timed_pop_filtered(wait, &[gst::MessageType::Eos, gst::MessageType::Error]) {
+            Some(message) => match message.view() {
+                gst::MessageView::Error(err) => Err(ProbeError::Failed(match err.debug() {
+                    Some(debug) => format!("{} ({debug})", err.error()),
+                    None => err.error().to_string(),
+                })),
+                _ => Ok(()),
+            },
+            None if wait == gst::ClockTime::ZERO => Err(ProbeError::Failed(
+                "The pipeline failed to start".to_string(),
+            )),
+            None => Err(ProbeError::TimedOut),
+        };
 
     if let Err(err) = pipeline.set_state(gst::State::Null) {
         tracing::warn!("Failed to stop the encoder probe: {:?}", err);

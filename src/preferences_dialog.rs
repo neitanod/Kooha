@@ -921,7 +921,8 @@ fn choice_encoder(choice: VideoEncoder) -> Option<H264Encoder> {
 
 /// The label of an encoder item, with the element that is not installed.
 fn encoder_item_label(choice: VideoEncoder, missing_element: Option<&str>) -> String {
-    let name = choice_encoder(choice).map_or_else(|| gettext("Automatic"), |e| e.name().to_string());
+    let name =
+        choice_encoder(choice).map_or_else(|| gettext("Automatic"), |e| e.name().to_string());
     match missing_element {
         Some(element) => gettext_f(
             // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
