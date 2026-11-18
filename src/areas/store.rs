@@ -3,8 +3,9 @@
 
 use std::{
     cell::{Cell, OnceCell, RefCell},
-    fs,
-    os::unix::fs::MetadataExt,
+    ffi::OsString,
+    fs, io,
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -40,6 +41,51 @@ impl FileStamp {
             len: metadata.len(),
         })
     }
+}
+
+/// An exclusive `flock` on `rectangles.json.lock`, released on drop. The
+/// file itself can't hold the lock: every save renames a new one into place.
+struct FileLock(fs::File);
+
+impl FileLock {
+    /// Waits until no other Kooha holds the lock of the areas file at
+    /// `path`, and takes it.
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let lock_path = lock_path(path);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)?;
+        loop {
+            // SAFETY: the descriptor is open for as long as `file` lives.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(Self(file));
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing the file releases it too; this only makes it explicit.
+        // SAFETY: the descriptor is still open here.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// `rectangles.json.lock`, next to the areas file.
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = OsString::from(path.as_os_str());
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
 mod imp {
@@ -287,10 +333,15 @@ impl AreaStore {
     /// Applies `op` to the file as it is on disk, then saves and emits
     /// `changed`. `op` returns whether it changed something, or an error
     /// before changing anything.
+    ///
+    /// The read, the change and the save happen under the lock of the file,
+    /// so that another Kooha can't save in between and lose this change or
+    /// have its own lost (codex code r1 #1).
     fn update(
         &self,
         op: impl FnOnce(&mut AreasFile) -> Result<bool, NameTaken>,
     ) -> Result<(), NameTaken> {
+        let lock = self.lock();
         let reloaded = self.reload_if_changed();
 
         let result = op(&mut self.imp().file.borrow_mut());
@@ -299,10 +350,24 @@ impl AreaStore {
         if changed {
             self.save();
         }
+        drop(lock);
         if changed || reloaded {
             self.emit_by_name::<()>("changed", &[]);
         }
         result.map(|_| ())
+    }
+
+    /// The lock of the file, or `None` if the file is never written or the
+    /// lock can't be taken: the change goes on unlocked rather than lost.
+    fn lock(&self) -> Option<FileLock> {
+        if self.imp().read_only.get() {
+            return None;
+        }
+        FileLock::acquire(self.path())
+            .inspect_err(|err| {
+                tracing::warn!("Changing the areas without the lock of the file: {}", err);
+            })
+            .ok()
     }
 
     /// Reads the file again if another Kooha wrote it since this one last
@@ -714,6 +779,37 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_writers_keep_each_others_areas() {
+        use std::{sync::Barrier, thread};
+
+        const SAVES: usize = 25;
+        let dir = TempDir::new();
+        let path = dir.file();
+        let barrier = Barrier::new(2);
+
+        // Two stores on the same file, each in its own thread like two
+        // Kooha processes, adding different areas at the same time.
+        thread::scope(|scope| {
+            for writer in ["A", "B"] {
+                let path = path.clone();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let store = AreaStore::with_path(path);
+                    barrier.wait();
+                    for n in 0..SAVES {
+                        store
+                            .save_named(&format!("{writer}{n}"), area(1), false)
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        let on_disk = file::load(&path).unwrap();
+        assert_eq!(on_disk.areas.len(), 2 * SAVES);
+    }
+
+    #[test]
     fn a_taken_name_is_checked_against_the_file() {
         let dir = TempDir::new();
         let first = AreaStore::with_path(dir.file());
@@ -791,7 +887,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
         assert_eq!(failed.borrow().len(), 1);
         assert_eq!(names(&store), ["Demo", "Other"]);
-        assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
+        // No temporary file left behind; the lock file stays.
+        assert_eq!(
+            files_in(parent),
+            ["rectangles.json", "rectangles.json.lock"]
+        );
     }
 
     #[test]
@@ -816,10 +916,20 @@ mod tests {
             failed.borrow()
         );
         assert_eq!(names(&store), ["Demo", "Other"]);
-        let names = fs::read_dir(path.parent().unwrap())
+        // No temporary file left behind; the lock file stays.
+        assert_eq!(
+            files_in(path.parent().unwrap()),
+            ["rectangles.json", "rectangles.json.lock"]
+        );
+    }
+
+    /// The names of the files in `dir`, sorted.
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(dir)
             .unwrap()
-            .map(|entry| entry.unwrap().file_name())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["rectangles.json"]);
+        names.sort();
+        names
     }
 }
