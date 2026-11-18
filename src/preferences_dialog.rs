@@ -1386,13 +1386,23 @@ mod tests {
         reset_camera_keys(&settings);
     }
 
+    /// Resets `profile-id` and leaves no value stored. The first reset moves
+    /// the profile row, which stores the default as the user's choice; the
+    /// second removes it. A stored value would make a later reset in another
+    /// test notify every window still alive.
+    fn reset_profile(settings: &Settings) {
+        settings.reset("profile-id");
+        settings.reset("profile-id");
+        assert!(settings.user_value("profile-id").is_none());
+    }
+
     fn encoder_dialog() -> (Settings, PreferencesDialog) {
         setup_schema();
         init_resources();
         gst::init().unwrap();
 
         let settings = Settings::default();
-        settings.reset("profile-id");
+        reset_profile(&settings);
         settings.reset("video-encoder");
         let dialog = PreferencesDialog::new(&settings);
         (settings, dialog)
@@ -1414,7 +1424,7 @@ mod tests {
             assert_eq!(row.is_visible(), visible, "{id}");
         }
 
-        settings.reset("profile-id");
+        reset_profile(&settings);
     }
 
     #[gtk::test]
@@ -1460,7 +1470,7 @@ mod tests {
         wait_for_subtitle(&row);
         assert_eq!(row.subtitle().as_deref(), Some("Automatic uses CPU"));
 
-        settings.reset("profile-id");
+        reset_profile(&settings);
         settings.reset("video-encoder");
     }
 
@@ -1491,7 +1501,7 @@ mod tests {
         drain_main_context();
         assert_eq!(FAKE_PROBES.get() - probes_before, probes);
 
-        settings.reset("profile-id");
+        reset_profile(&settings);
         settings.reset("video-encoder");
     }
 
