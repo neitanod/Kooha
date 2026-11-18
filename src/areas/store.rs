@@ -92,6 +92,13 @@ fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once between the initial load of the next store created in this
+    /// thread and the stamp of the version it loaded.
+    static AFTER_INITIAL_LOAD: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
 mod imp {
     use std::sync::LazyLock;
 
@@ -153,10 +160,25 @@ impl AreaStore {
         let obj = glib::Object::new::<Self>();
         let imp = obj.imp();
 
+        // Under the lock, so that another Kooha can't save between the
+        // load and its stamp, and have its save lost on the next change
+        // here (codex code r2 #1).
+        let lock = FileLock::acquire(&path)
+            .inspect_err(|err| {
+                tracing::warn!("Loading the areas without the lock of the file: {}", err);
+            })
+            .ok();
         match file::load(&path) {
             Ok(file) => {
                 imp.file.replace(file);
-                imp.stamp.set(FileStamp::of(&path));
+                #[cfg(test)]
+                if let Some(hook) = AFTER_INITIAL_LOAD.with_borrow_mut(Option::take) {
+                    hook();
+                }
+                // Without the lock, no stamp: the first change reads the
+                // file again.
+                imp.stamp
+                    .set(lock.as_ref().and_then(|_| FileStamp::of(&path)));
             }
             Err(err) => {
                 tracing::warn!("Starting with no areas: {}", err);
@@ -166,6 +188,7 @@ impl AreaStore {
                 imp.load_notice.replace(Some(err));
             }
         }
+        drop(lock);
 
         imp.path.set(path).unwrap();
         obj
@@ -355,13 +378,16 @@ impl AreaStore {
         op: impl FnOnce(&mut AreasFile) -> Result<bool, NameTaken>,
     ) -> Result<(), NameTaken> {
         let lock = self.lock();
-        let reloaded = self.reload_if_changed();
+        let reloaded = lock.is_ok() && self.reload_if_changed();
 
         let result = op(&mut self.imp().file.borrow_mut());
 
         let changed = matches!(result, Ok(true));
         if changed {
-            self.save();
+            match &lock {
+                Ok(_) => self.save(),
+                Err(message) => self.fail_save(message),
+            }
         }
         drop(lock);
         if changed || reloaded {
@@ -370,17 +396,20 @@ impl AreaStore {
         result.map(|_| ())
     }
 
-    /// The lock of the file, or `None` if the file is never written or the
-    /// lock can't be taken: the change goes on unlocked rather than lost.
-    fn lock(&self) -> Option<FileLock> {
+    /// The lock of the file, or `None` if the file is never written. If
+    /// the lock can't be taken, the message for the user: the change stays
+    /// in memory, as writing without the lock could lose another Kooha's
+    /// (codex code r2 #1).
+    fn lock(&self) -> Result<Option<FileLock>, String> {
         if self.imp().read_only.get() {
-            return None;
+            return Ok(None);
         }
-        FileLock::acquire(self.path())
-            .inspect_err(|err| {
-                tracing::warn!("Changing the areas without the lock of the file: {}", err);
-            })
-            .ok()
+        FileLock::acquire(self.path()).map(Some).map_err(|err| {
+            gettext_f(
+                "The areas weren’t saved: {error}",
+                &[("error", &err.to_string())],
+            )
+        })
     }
 
     /// Reads the file again if another Kooha wrote it since this one last
@@ -434,11 +463,14 @@ impl AreaStore {
 
         match result {
             Ok(()) => imp.stamp.set(FileStamp::of(path)),
-            Err(message) => {
-                tracing::error!("Failed to save `{}`: {}", path.display(), message);
-                self.emit_by_name::<()>("save-failed", &[&message]);
-            }
+            Err(message) => self.fail_save(&message),
         }
+    }
+
+    /// Tells that the change stays in memory only.
+    fn fail_save(&self, message: &str) {
+        tracing::error!("Failed to save `{}`: {}", self.path().display(), message);
+        self.emit_by_name::<()>("save-failed", &[&message]);
     }
 }
 
@@ -820,6 +852,66 @@ mod tests {
 
         let on_disk = file::load(&path).unwrap();
         assert_eq!(on_disk.areas.len(), 2 * SAVES);
+    }
+
+    #[test]
+    fn a_save_during_the_initial_load_is_kept() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        let dir = TempDir::new();
+        let path = dir.file();
+        AreaStore::with_path(path.clone())
+            .save_named("Old", area(1), false)
+            .unwrap();
+
+        // Another Kooha saves right after this one read the file, before it
+        // took the version of what it read (codex code r2 #1).
+        let writer = Rc::new(RefCell::new(None));
+        let hook_writer = writer.clone();
+        let hook_path = path.clone();
+        AFTER_INITIAL_LOAD.set(Some(Box::new(move || {
+            let (saved, has_saved) = mpsc::channel();
+            hook_writer.replace(Some(thread::spawn(move || {
+                AreaStore::with_path(hook_path)
+                    .save_named("Other", area(2), false)
+                    .unwrap();
+                let _ = saved.send(());
+            })));
+            // Long enough for it to save, unless the load holds the lock.
+            let _ = has_saved.recv_timeout(Duration::from_millis(500));
+        })));
+        let store = AreaStore::with_path(path.clone());
+        writer.take().unwrap().join().unwrap();
+
+        store.save_named("Mine", area(3), false).unwrap();
+
+        let on_disk = file::load(&path).unwrap();
+        assert_eq!(
+            on_disk
+                .areas
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Old", "Other", "Mine"]
+        );
+    }
+
+    #[test]
+    fn a_change_without_the_lock_stays_in_memory() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        // A directory can't be opened to be locked.
+        fs::create_dir_all(lock_path(&path)).unwrap();
+        let store = AreaStore::with_path(path.clone());
+        let failed = failures(&store);
+        let count = changes(&store);
+
+        store.save_named("Demo", area(100), false).unwrap();
+
+        assert_eq!(names(&store), ["Demo"]);
+        assert_eq!(count.get(), 1);
+        assert_eq!(failed.borrow().len(), 1);
+        assert!(!path.exists());
     }
 
     #[test]
