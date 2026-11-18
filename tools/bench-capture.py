@@ -35,11 +35,12 @@ Sources:
 
 The restore token (portal and --probe-session). Before opening the session the
 current token is saved to /tmp/kooha-bench-token.bak. Start spends the token:
-KDE hands out a successor with every session. The script writes the successor
-to Kooha's key as soon as Start answers, before any pipeline runs, when the
-session started without a dialog (Start answered in under 2 s) and the stream
-is a monitor; it says when it leaves the key alone. If KDE showed the dialog,
-the key stays as it was and the script stops, unless `--allow-dialog`.
+KDE hands out a successor with every session. Whenever Start succeeds and the
+stream is a monitor, the script writes the successor to Kooha's key as soon as
+Start answers, before any pipeline runs, however long Start took: the original
+token is spent either way, and a restore without a dialog may be slow. It says
+when it leaves the key alone (the stream is not a monitor, or KDE gave no
+successor). The seconds Start took are printed, as a fact only.
 
 The .bak is only restored by hand
 (`gsettings set io.github.seadve.Kooha screencast-restore-token "$(cat
@@ -48,9 +49,10 @@ it sees another app id than Kooha's: then Kooha's original token is intact.
 
     --probe-session    Only opens and closes the session, to check whether KDE
                        accepts Kooha's token from a process that is not Kooha.
-    --allow-dialog     Go on measuring even if KDE showed the dialog; the key
-                       is still left as it was.
-    --write-token      With --allow-dialog, write the successor anyway.
+    --allow-dialog     Accepted and ignored: the script no longer guesses
+    --write-token      whether KDE showed a dialog, and always writes the
+                       successor of a monitor stream. Kept so that older
+                       command lines still run.
     --with-kde-region  At the end, opens a second session without the token for
                        KDE's own region sharing (pick a 1280x720 region in the
                        dialog) and records it as the `kde-region` variant. Its
@@ -129,7 +131,6 @@ ALL_VARIANTS = [
 PORTAL_ONLY = {"intel-dmabuf", "nvidia-dmabuf"}
 KDE_REGION = "kde-region"
 STARTUP_TIMEOUT = 15
-NO_DIALOG_SECONDS = 2.0
 MIN_SOURCE_SHARE = 0.9
 TOKEN_BACKUP = "/tmp/kooha-bench-token.bak"
 KOOHA_SCHEMA = "io.github.seadve.Kooha"
@@ -543,35 +544,24 @@ def write_restore_token(token):
     )
 
 
-class DialogShown(Exception):
-    pass
-
-
-def token_writer(allow_dialog, write_token):
+def token_writer(write=None):
     """The on_started handler for Kooha's own session.
 
-    Writes the successor token to Kooha's key when the session started without
-    a dialog and the stream is a monitor. Raises DialogShown if KDE showed the
-    dialog and `allow_dialog` is off.
+    Writes the successor token to Kooha's key with `write` (by default
+    write_restore_token) whenever the stream is a monitor and KDE gave a
+    successor, however long Start took.
     """
+    write = write or write_restore_token
 
     def on_started(results, seconds):
         streams = results.get("streams", [])
         is_monitor = len(streams) == 1 and (
             streams[0][1].get("source_type", 0) == SOURCE_MONITOR
         )
-        dialog = seconds >= NO_DIALOG_SECONDS
         new_token = results.get("restore_token", "")
         print(f"Start answered in {seconds:.1f} s", flush=True)
 
-        if dialog and not allow_dialog:
-            raise DialogShown(
-                "KDE showed the dialog: Kooha's key is left as it was. Run "
-                "with --allow-dialog to measure anyway."
-            )
-        if dialog and not write_token:
-            print("KDE showed the dialog: Kooha's key is left as it was.", flush=True)
-        elif not is_monitor:
+        if not is_monitor:
             print(
                 "The stream is not a monitor: Kooha's key is left as it was.",
                 flush=True,
@@ -583,7 +573,7 @@ def token_writer(allow_dialog, write_token):
                 flush=True,
             )
         else:
-            write_restore_token(new_token)
+            write(new_token)
             print("Wrote the successor token to Kooha's key.", flush=True)
 
     return on_started
@@ -598,7 +588,7 @@ def open_kooha_session(portal, args):
         SOURCE_MONITOR,
         PERSIST_UNTIL_REVOKED,
         token,
-        token_writer(args.allow_dialog, args.write_token),
+        token_writer(),
     )
 
 
@@ -695,8 +685,9 @@ def parse_args(argv):
     )
     parser.add_argument("--out", help="also write the tables to this file")
     parser.add_argument("--no-ball-window", action="store_true")
-    parser.add_argument("--allow-dialog", action="store_true")
-    parser.add_argument("--write-token", action="store_true")
+    # No-ops, kept so that older command lines still run.
+    parser.add_argument("--allow-dialog", action="store_true", help="ignored")
+    parser.add_argument("--write-token", action="store_true", help="ignored")
     parser.add_argument("--with-kde-region", action="store_true")
     parser.add_argument("--probe-session", action="store_true")
     parser.add_argument("--ball-window", type=float, help=argparse.SUPPRESS)
@@ -812,7 +803,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except DialogShown as e:
-        sys.exit(str(e))
+    sys.exit(main(sys.argv[1:]))
