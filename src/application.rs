@@ -9,7 +9,7 @@ use gtk::{
 use crate::{
     about,
     areas::{self, AreaStore},
-    areas_window::{AreasWindow, MarkRequest},
+    areas_window::AreasWindow,
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
@@ -21,7 +21,7 @@ use crate::{
         TrayCommand, TrayModel, TrayRequest, TrayService,
         model::{TrayArea, TrayRecordingState, tray_areas, tray_state},
     },
-    window::{RecordingSnapshot, Window},
+    window::{MarkTarget, RecordingSnapshot, Window},
 };
 
 mod imp {
@@ -366,7 +366,14 @@ impl Application {
             TrayCommand::MarkArea => {
                 // The marking starts from the main window, on screen.
                 self.present_window(activation_token.as_deref());
-                MarkRequest::New.activate_on(&self.window());
+                let window = self.window();
+                glib::spawn_future_local(clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    async move {
+                        obj.mark_new_area(&window).await;
+                    }
+                ));
             }
             TrayCommand::ToggleAreaBorder => {
                 let settings = self.settings();
@@ -383,6 +390,15 @@ impl Application {
             | TrayCommand::TogglePointer => {
                 apply_tray_command(&command, self.settings(), self.has_recording());
             }
+        }
+    }
+
+    /// Marks a new area from the tray. An area marked switches to Selection
+    /// mode, as choosing one does: it is the area to record (fable code r1
+    /// #7).
+    async fn mark_new_area(&self, window: &Window) {
+        if window.mark_area(MarkTarget::New).await.is_some() {
+            self.settings().set_capture_mode(CaptureMode::Selection);
         }
     }
 
@@ -590,9 +606,13 @@ fn apply_tray_command(command: &TrayCommand, settings: &Settings, has_recording:
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use crate::{
+        area_marker::save_dialog::SaveChoice,
         areas::Selected,
+        cancelled::Cancelled,
         recording::RecordingState,
         settings::CaptureMode,
         settings::test_utils::{init_resources, settings_lock, setup_schema},
@@ -753,6 +773,40 @@ mod tests {
 
         assert_eq!(store.selected(), Some(Selected::Named("Demo".into())));
         assert_eq!(settings.capture_mode(), CaptureMode::Selection);
+        settings.reset("capture-mode");
+    }
+
+    /// «Mark New Area…» in the tray switches to Selection mode once an area
+    /// is marked, like choosing one.
+    // The settings lock keeps other tests off the shared settings while
+    // this one awaits, on the single test thread of GTK.
+    #[allow(clippy::await_holding_lock)]
+    #[gtk::test]
+    async fn tray_marking_switches_to_selection_mode() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let settings = app.settings();
+        let window = app.window();
+        window.set_save_asker(Rc::new(|_, _| Box::pin(async { SaveChoice::Last })));
+
+        // Cancelled: the mode stays.
+        settings.set_capture_mode(CaptureMode::MonitorWindow);
+        window.set_marker(Rc::new(|_| {
+            Box::pin(async { Err(Cancelled::new("area marking").into()) })
+        }));
+        app.mark_new_area(&window).await;
+        assert_eq!(settings.capture_mode(), CaptureMode::MonitorWindow);
+
+        window.set_marker(Rc::new(|_| Box::pin(async { Ok(area()) })));
+        app.mark_new_area(&window).await;
+        assert_eq!(settings.capture_mode(), CaptureMode::Selection);
+        // The window saves in the store of the thread's application.
+        assert_eq!(Application::get().area_store().last(), Some(area()));
+
         settings.reset("capture-mode");
     }
 
