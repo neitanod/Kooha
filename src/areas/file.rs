@@ -45,7 +45,7 @@ impl Default for AreasFile {
 }
 
 /// The chosen area: a saved one by name, or the last marked one.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Selected {
     Named(String),
     Last,
@@ -77,6 +77,8 @@ pub enum LoadError {
     Broken { moved_to: PathBuf },
     /// The file was unreadable or invalid, and couldn't be renamed either.
     Io(io::Error),
+    /// The file was written by a newer Kooha, and was left untouched.
+    UnsupportedVersion(u32),
 }
 
 impl fmt::Display for LoadError {
@@ -86,6 +88,9 @@ impl fmt::Display for LoadError {
                 write!(f, "Broken areas file, moved to `{}`", moved_to.display())
             }
             Self::Io(err) => write!(f, "Broken areas file that couldn't be moved: {err}"),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "Areas file of the newer version {version}")
+            }
         }
     }
 }
@@ -94,19 +99,29 @@ impl std::error::Error for LoadError {}
 
 /// Where the areas file lives: `rectangles.json` in Kooha's config
 /// directory, which follows `XDG_CONFIG_HOME`.
+#[cfg(not(test))]
 pub fn path() -> PathBuf {
     glib::user_config_dir()
         .join("kooha")
         .join("rectangles.json")
 }
 
+/// In tests, a per-process temporary directory: no test may touch the
+/// user's areas.
+#[cfg(test)]
+pub fn path() -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("kooha-test-{}", std::process::id()))
+        .join("rectangles.json")
+}
+
 /// Reads the areas file at `path`. A missing file is an empty one. An
 /// unreadable or invalid file is renamed to
 /// `rectangles.json.broken-<YYYYMMDD-HHMMSS>` so that the next save
-/// doesn't overwrite it.
+/// doesn't overwrite it. A file of a newer version is left as it is.
 pub fn load(path: &Path) -> Result<AreasFile, LoadError> {
     let parsed = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<AreasFile>(&bytes).map_err(|err| err.to_string()),
+        Ok(bytes) => parse(&bytes)?,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(AreasFile::default()),
         Err(err) => Err(err.to_string()),
     };
@@ -122,15 +137,32 @@ pub fn load(path: &Path) -> Result<AreasFile, LoadError> {
     }
 }
 
-/// Writes `file` to `path` atomically: to `<path>.tmp` first, synced, then
-/// renamed over `path`. Creates the directory if needed.
+/// Parses the file, or tells why it is broken. Checks the version first,
+/// so that a newer format that this one can't read isn't taken as broken.
+fn parse(bytes: &[u8]) -> Result<Result<AreasFile, String>, LoadError> {
+    #[derive(Deserialize)]
+    struct Versioned {
+        version: u32,
+    }
+
+    match serde_json::from_slice::<Versioned>(bytes) {
+        Ok(Versioned { version }) if version > VERSION => {
+            Err(LoadError::UnsupportedVersion(version))
+        }
+        Ok(_) => Ok(serde_json::from_slice::<AreasFile>(bytes).map_err(|err| err.to_string())),
+        Err(err) => Ok(Err(err.to_string())),
+    }
+}
+
+/// Writes `file` to `path` atomically: to `<path>.tmp-<pid>` first, synced,
+/// then renamed over `path`. Creates the directory if needed.
 pub fn save(path: &Path, file: &AreasFile) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let json = serde_json::to_string_pretty(file).map_err(io::Error::other)?;
-    let tmp = with_suffix(path, ".tmp");
+    let tmp = temporary_path(path);
     let mut out = fs::File::create(&tmp)?;
     out.write_all(json.as_bytes())?;
     out.write_all(b"\n")?;
@@ -138,6 +170,11 @@ pub fn save(path: &Path, file: &AreasFile) -> io::Result<()> {
     drop(out);
 
     fs::rename(&tmp, path)
+}
+
+/// Per process, so that two Kooha instances never write the same one.
+fn temporary_path(path: &Path) -> PathBuf {
+    with_suffix(path, &format!(".tmp-{}", std::process::id()))
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -336,6 +373,50 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&link).unwrap(), "old");
         assert_eq!(load(&path).unwrap(), sample());
-        assert!(!dir.0.join("kooha").join("rectangles.json.tmp").exists());
+        let names = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["rectangles.json"]);
+    }
+
+    #[test]
+    fn temporary_file_is_per_process() {
+        let path = PathBuf::from("/x/rectangles.json");
+        assert_eq!(
+            temporary_path(&path),
+            PathBuf::from(format!("/x/rectangles.json.tmp-{}", std::process::id()))
+        );
+    }
+
+    #[test]
+    fn newer_version_is_left_alone() {
+        let dir = TempDir::new();
+        let contents = r#"{ "version": 2, "areas": [], "future": true }"#;
+        let path = write(&dir, contents);
+
+        let Err(LoadError::UnsupportedVersion(2)) = load(&path) else {
+            panic!("A newer version must not load");
+        };
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn tests_never_use_the_real_config_dir() {
+        let path = path();
+        let dir = std::env::temp_dir().join(format!("kooha-test-{}", std::process::id()));
+        assert_eq!(path, dir.join("rectangles.json"));
+    }
+
+    #[test]
+    fn selected_is_hashable() {
+        let set = std::collections::HashSet::from([
+            Selected::Last,
+            Selected::Named("Demo".into()),
+            Selected::Last,
+        ]);
+        assert_eq!(set.len(), 2);
     }
 }
