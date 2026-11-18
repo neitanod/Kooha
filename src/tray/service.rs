@@ -5,7 +5,7 @@ use gettextrs::gettext;
 use ksni::{
     MenuItem,
     blocking::{Handle, TrayMethods},
-    menu::{CheckmarkItem, StandardItem},
+    menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem, SubMenu},
 };
 
 use super::model::{self, TrayCommand, TrayEntry, TrayModel};
@@ -95,7 +95,12 @@ impl KoohaTray {
             activation_token: (self.activation_token)(),
         };
         if let Err(err) = self.sender.unbounded_send(request) {
-            tracing::warn!("Failed to send tray command {:?}: {}", command, err);
+            let reason = err.to_string();
+            tracing::warn!(
+                "Failed to send tray command {:?}: {}",
+                err.into_inner().command,
+                reason
+            );
         }
     }
 }
@@ -136,11 +141,70 @@ impl ksni::Tray for KoohaTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        model::menu_entries(&self.model)
-            .into_iter()
-            .map(menu_item)
-            .collect()
+        menu_items(model::menu_entries(&self.model))
     }
+}
+
+/// The menu items of `entries`, with each run of radios as one group.
+fn menu_items(entries: Vec<TrayEntry>) -> Vec<MenuItem<KoohaTray>> {
+    let mut items = Vec::new();
+    let mut radios = Vec::new();
+
+    for entry in entries {
+        if matches!(entry, TrayEntry::Radio { .. }) {
+            radios.push(entry);
+            continue;
+        }
+        if !radios.is_empty() {
+            items.push(radio_group(std::mem::take(&mut radios)));
+        }
+        items.push(menu_item(entry));
+    }
+    if !radios.is_empty() {
+        items.push(radio_group(radios));
+    }
+
+    items
+}
+
+/// One group of `radios`, which are all `TrayEntry::Radio`.
+fn radio_group(radios: Vec<TrayEntry>) -> MenuItem<KoohaTray> {
+    let mut options = Vec::new();
+    let mut commands = Vec::new();
+    // `selected` is required: with none selected, an index no radio has.
+    let mut selected_index = usize::MAX;
+
+    for (index, radio) in radios.into_iter().enumerate() {
+        let TrayEntry::Radio {
+            label,
+            command,
+            enabled,
+            selected,
+        } = radio
+        else {
+            unreachable!("only radios are grouped");
+        };
+        if selected {
+            selected_index = index;
+        }
+        options.push(RadioItem {
+            label,
+            enabled,
+            ..Default::default()
+        });
+        commands.push(command);
+    }
+
+    RadioGroup {
+        selected: selected_index,
+        select: Box::new(move |tray: &mut KoohaTray, index| {
+            if let Some(command) = commands.get(index) {
+                tray.send(command.clone());
+            }
+        }),
+        options,
+    }
+    .into()
 }
 
 fn menu_item(entry: TrayEntry) -> MenuItem<KoohaTray> {
@@ -158,7 +222,7 @@ fn menu_item(entry: TrayEntry) -> MenuItem<KoohaTray> {
         } => StandardItem {
             label,
             enabled,
-            activate: Box::new(move |tray: &mut KoohaTray| tray.send(command)),
+            activate: Box::new(move |tray: &mut KoohaTray| tray.send(command.clone())),
             ..Default::default()
         }
         .into(),
@@ -171,10 +235,17 @@ fn menu_item(entry: TrayEntry) -> MenuItem<KoohaTray> {
             label,
             checked,
             enabled,
-            activate: Box::new(move |tray: &mut KoohaTray| tray.send(command)),
+            activate: Box::new(move |tray: &mut KoohaTray| tray.send(command.clone())),
             ..Default::default()
         }
         .into(),
+        TrayEntry::SubMenu { label, children } => SubMenu {
+            label,
+            submenu: menu_items(children),
+            ..Default::default()
+        }
+        .into(),
+        radio @ TrayEntry::Radio { .. } => radio_group(vec![radio]),
         TrayEntry::Separator => MenuItem::Separator,
     }
 }
@@ -187,7 +258,10 @@ mod tests {
     use ksni::{MenuItem, Tray};
 
     use super::*;
-    use crate::tray::model::{self, TrayRecordingState};
+    use crate::{
+        areas::Selected,
+        tray::model::{self, TrayArea, TrayRecordingState},
+    };
 
     fn idle_model() -> TrayModel {
         TrayModel {
@@ -200,7 +274,112 @@ mod tests {
             audio_supported: true,
             camera_enabled: false,
             camera_available: true,
+            areas_available: false,
+            areas: Vec::new(),
+            show_area_border: true,
         }
+    }
+
+    fn area(name: &str, chosen: bool) -> TrayArea {
+        TrayArea {
+            label: name.to_string(),
+            selected: Selected::Named(name.to_string()),
+            enabled: true,
+            chosen,
+        }
+    }
+
+    fn tray_with_areas(areas: Vec<TrayArea>) -> (KoohaTray, mpsc::UnboundedReceiver<TrayRequest>) {
+        let (sender, receiver) = mpsc::unbounded();
+        let mut model = idle_model();
+        model.areas_available = true;
+        model.areas = areas;
+        let tray = KoohaTray {
+            model,
+            sender,
+            activation_token: fake_token,
+        };
+        (tray, receiver)
+    }
+
+    fn area_submenu(items: &[MenuItem<KoohaTray>]) -> &[MenuItem<KoohaTray>] {
+        items
+            .iter()
+            .find_map(|item| match item {
+                MenuItem::SubMenu(submenu) if submenu.label == "Area" => Some(&submenu.submenu[..]),
+                _ => None,
+            })
+            .expect("menu has the Area submenu")
+    }
+
+    fn command(receiver: &mut mpsc::UnboundedReceiver<TrayRequest>) -> TrayCommand {
+        receiver.try_recv().expect("a command was sent").command
+    }
+
+    /// The radios become one group, then the separator and Mark New Area.
+    #[test]
+    fn area_submenu_maps_radios_to_one_group() {
+        let (mut tray, mut receiver) =
+            tray_with_areas(vec![area("Demo", false), area("Talk", true)]);
+
+        let items = tray.menu();
+        let submenu = area_submenu(&items);
+
+        assert_eq!(submenu.len(), 3);
+        let MenuItem::RadioGroup(group) = &submenu[0] else {
+            panic!("expected a radio group, got {:?}", submenu[0]);
+        };
+        assert_eq!(group.options.len(), 2);
+        assert_eq!(group.options[1].label, "Talk");
+        assert_eq!(group.selected, 1);
+        assert!(matches!(submenu[1], MenuItem::Separator));
+        assert!(matches!(&submenu[2], MenuItem::Standard(item) if item.label == "Mark New Area…"));
+
+        (group.select)(&mut tray, 0);
+        assert_eq!(
+            command(&mut receiver),
+            TrayCommand::SelectArea(Selected::Named("Demo".to_string()))
+        );
+    }
+
+    /// `RadioGroup::selected` is required: with none chosen, an index no
+    /// radio has.
+    #[test]
+    fn no_chosen_area_selects_no_radio() {
+        let (tray, _receiver) = tray_with_areas(vec![area("Demo", false), area("Talk", false)]);
+
+        let items = tray.menu();
+        let MenuItem::RadioGroup(group) = &area_submenu(&items)[0] else {
+            panic!("expected a radio group");
+        };
+        assert_eq!(group.selected, usize::MAX);
+    }
+
+    /// ksni calls the same callback for each click, so each one clones the
+    /// command.
+    #[test]
+    fn two_clicks_send_two_commands() {
+        let (mut tray, mut receiver) = tray_with_areas(vec![area("Demo", false)]);
+
+        let items = tray.menu();
+        let submenu = area_submenu(&items);
+        let MenuItem::Standard(mark) = &submenu[2] else {
+            panic!("expected Mark New Area");
+        };
+        (mark.activate)(&mut tray);
+        (mark.activate)(&mut tray);
+        let MenuItem::RadioGroup(group) = &submenu[0] else {
+            panic!("expected a radio group");
+        };
+        (group.select)(&mut tray, 0);
+        (group.select)(&mut tray, 0);
+
+        assert_eq!(command(&mut receiver), TrayCommand::MarkArea);
+        assert_eq!(command(&mut receiver), TrayCommand::MarkArea);
+        let demo = TrayCommand::SelectArea(Selected::Named("Demo".to_string()));
+        assert_eq!(command(&mut receiver), demo);
+        assert_eq!(command(&mut receiver), demo);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

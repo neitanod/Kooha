@@ -2,21 +2,25 @@ use adw::{prelude::*, subclass::prelude::*};
 use futures_util::StreamExt;
 use gettextrs::gettext;
 use gtk::{
-    gio,
+    gdk, gio,
     glib::{self, clone},
 };
 
 use crate::{
     about,
-    areas::AreaStore,
+    areas::{self, AreaStore},
+    areas_window::{AreasWindow, MarkRequest},
     camera_pip::CameraPip,
     capture_warnings::CaptureWarnings,
     config::{APP_ID, PKGDATADIR, PROFILE, VERSION},
     doctor::dialog::RequirementsDialog,
     format, overlay,
     preferences_dialog::PreferencesDialog,
-    settings::Settings,
-    tray::{TrayCommand, TrayModel, TrayRequest, TrayService, model::tray_state},
+    settings::{CaptureMode, Settings},
+    tray::{
+        TrayCommand, TrayModel, TrayRequest, TrayService,
+        model::{TrayArea, TrayRecordingState, tray_areas, tray_state},
+    },
     window::{RecordingSnapshot, Window},
 };
 
@@ -31,6 +35,8 @@ mod imp {
         pub(super) tray: OnceCell<TrayService>,
         pub(super) camera_pip: OnceCell<CameraPip>,
         pub(super) area_store: OnceCell<AreaStore>,
+        /// Hidden, not destroyed, when closed.
+        pub(super) areas_window: glib::WeakRef<AreasWindow>,
         /// The last snapshot the window sent, reused on settings changes.
         pub(super) tray_snapshot: Cell<Option<RecordingSnapshot>>,
     }
@@ -138,6 +144,20 @@ impl Application {
             .clone()
     }
 
+    /// The Areas window, built over the main window the first time. Closing
+    /// it only hides it, so it is reused until the main window goes.
+    fn areas_window(&self) -> AreasWindow {
+        let imp = self.imp();
+        if let Some(window) = imp.areas_window.upgrade() {
+            return window;
+        }
+
+        let window = AreasWindow::new(&self.area_store(), &self.window());
+        window.set_recording(is_recording(imp.tray_snapshot.get()));
+        imp.areas_window.set(Some(&window));
+        window
+    }
+
     /// The camera `PiP`, created in `startup`.
     pub fn camera_pip(&self) -> Option<&CameraPip> {
         self.imp().camera_pip.get()
@@ -214,9 +234,30 @@ impl Application {
 
         imp.tray_snapshot.set(snapshot);
 
-        if let Some(tray) = imp.tray.get() {
-            tray.update(tray_model(snapshot, self.settings()));
+        if let Some(window) = imp.areas_window.upgrade() {
+            window.set_recording(is_recording(snapshot));
         }
+
+        if let Some(tray) = imp.tray.get() {
+            tray.update(tray_model(snapshot, self.settings(), self.tray_areas()));
+        }
+    }
+
+    /// The areas for the tray, or `None` without overlays to mark and
+    /// show them.
+    fn tray_areas(&self) -> Option<Vec<TrayArea>> {
+        overlay::availability().ok()?;
+
+        let store = self.area_store();
+        let monitors = gdk::Display::default()
+            .map(|display| areas::monitors::current(&display))
+            .unwrap_or_default();
+        Some(tray_areas(
+            &store.areas(),
+            store.last().as_ref(),
+            store.selected().as_ref(),
+            &monitors,
+        ))
     }
 
     fn refresh_tray(&self) {
@@ -227,7 +268,7 @@ impl Application {
         let settings = self.settings();
 
         let (sender, mut receiver) = futures_channel::mpsc::unbounded();
-        let tray = TrayService::spawn(sender, tray_model(None, settings));
+        let tray = TrayService::spawn(sender, tray_model(None, settings, self.tray_areas()));
         self.imp().tray.set(tray).unwrap();
 
         glib::spawn_future_local(clone!(
@@ -265,6 +306,28 @@ impl Application {
             self,
             move |_| obj.refresh_tray()
         ));
+        settings.connect_show_area_border_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+        self.area_store().connect_changed(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| obj.refresh_tray()
+        ));
+        // Areas go out of date, and back, as monitors change. The handlers
+        // live as long as the display, so they hold the app weakly.
+        if let Some(display) = gdk::Display::default() {
+            areas::monitors::watch(
+                &display,
+                clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    move || obj.refresh_tray()
+                ),
+            );
+        }
     }
 
     fn handle_tray_command(&self, request: TrayRequest) {
@@ -292,6 +355,23 @@ impl Application {
                 let settings = self.settings();
                 settings.set_camera_enabled(!settings.camera_enabled());
             }
+            TrayCommand::SelectArea(selected) => {
+                // The menu disables it while recording; this covers a click
+                // that arrives late.
+                if !self.has_recording() {
+                    self.area_store().select(Some(selected));
+                    self.settings().set_capture_mode(CaptureMode::Selection);
+                }
+            }
+            TrayCommand::MarkArea => {
+                // The marking starts from the main window, on screen.
+                self.present_window(activation_token.as_deref());
+                MarkRequest::New.activate_on(&self.window());
+            }
+            TrayCommand::ToggleAreaBorder => {
+                let settings = self.settings();
+                settings.set_show_area_border(!settings.show_area_border());
+            }
             TrayCommand::ShowWindow => self.present_window(activation_token.as_deref()),
             TrayCommand::Quit => {
                 // The quit confirmation needs the window on screen.
@@ -301,13 +381,15 @@ impl Application {
             TrayCommand::ToggleDesktopAudio
             | TrayCommand::ToggleMicrophone
             | TrayCommand::TogglePointer => {
-                let has_recording = self
-                    .active_window()
-                    .and_downcast::<Window>()
-                    .is_some_and(|window| window.recording_snapshot().is_some());
-                apply_tray_command(command, self.settings(), has_recording);
+                apply_tray_command(&command, self.settings(), self.has_recording());
             }
         }
+    }
+
+    fn has_recording(&self) -> bool {
+        self.active_window()
+            .and_downcast::<Window>()
+            .is_some_and(|window| window.recording_snapshot().is_some())
     }
 
     /// Brings the window to the front. On Wayland the compositor only does
@@ -405,6 +487,11 @@ impl Application {
                 RequirementsDialog::present_and_run(&obj.window(), obj.settings());
             })
             .build();
+        let show_areas_action = gio::ActionEntry::builder("show-areas")
+            .activate(|obj: &Self, _, _| {
+                obj.areas_window().present();
+            })
+            .build();
         let show_about_action = gio::ActionEntry::builder("show-about")
             .activate(|obj: &Self, _, _| {
                 about::present_dialog(&obj.window());
@@ -416,6 +503,7 @@ impl Application {
             quit_action,
             show_preferences_action,
             show_requirements_report_action,
+            show_areas_action,
             show_about_action,
         ]);
     }
@@ -433,8 +521,13 @@ impl Application {
     }
 }
 
-/// The tray contents for the window's recording `snapshot` and `settings`.
-fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayModel {
+/// The tray contents for the window's recording `snapshot`, `settings` and
+/// `areas`, `None` without overlays.
+fn tray_model(
+    snapshot: Option<RecordingSnapshot>,
+    settings: &Settings,
+    areas: Option<Vec<TrayArea>>,
+) -> TrayModel {
     let (state, duration, warnings) = snapshot.map_or(
         (None, gst::ClockTime::ZERO, CaptureWarnings::default()),
         |(state, duration, warnings)| (Some(state), duration, warnings),
@@ -452,7 +545,16 @@ fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayM
             .is_none_or(|profile| profile.supports_audio()),
         camera_enabled: settings.camera_enabled(),
         camera_available: overlay::availability().is_ok(),
+        areas_available: areas.is_some(),
+        areas: areas.unwrap_or_default(),
+        show_area_border: settings.show_area_border(),
     }
+}
+
+/// Whether the window's recording `snapshot` is past idle: from the portal
+/// and the countdown until it is saved.
+fn is_recording(snapshot: Option<RecordingSnapshot>) -> bool {
+    tray_state(snapshot.map(|(state, _, _)| state)) != TrayRecordingState::Idle
 }
 
 /// Applies a capture toggle from the tray to `settings`, which the window's
@@ -460,7 +562,7 @@ fn tray_model(snapshot: Option<RecordingSnapshot>, settings: &Settings) -> TrayM
 ///
 /// The tray disables the toggles during a recording; `has_recording` covers
 /// a click that arrives late.
-fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: bool) -> bool {
+fn apply_tray_command(command: &TrayCommand, settings: &Settings, has_recording: bool) -> bool {
     if has_recording {
         return false;
     }
@@ -476,6 +578,9 @@ fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: 
         TrayCommand::ToggleRecord
         | TrayCommand::TogglePause
         | TrayCommand::ToggleCamera
+        | TrayCommand::SelectArea(_)
+        | TrayCommand::MarkArea
+        | TrayCommand::ToggleAreaBorder
         | TrayCommand::ShowWindow
         | TrayCommand::Quit => return false,
     }
@@ -487,7 +592,9 @@ fn apply_tray_command(command: TrayCommand, settings: &Settings, has_recording: 
 mod tests {
     use super::*;
     use crate::{
+        areas::Selected,
         recording::RecordingState,
+        settings::CaptureMode,
         settings::test_utils::{init_resources, settings_lock, setup_schema},
         tray::{
             TrayCommand,
@@ -548,6 +655,145 @@ mod tests {
         assert!(app.lookup_action("show-requirements-report").is_some());
     }
 
+    #[gtk::test]
+    fn show_areas_action() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        app.setup_gactions();
+
+        assert!(app.lookup_action("show-areas").is_some());
+    }
+
+    /// `app.show-areas` presents the same window each time, over the main
+    /// window, whose actions mark the areas.
+    #[gtk::test]
+    fn areas_window_is_reused_over_the_main_window() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let first = app.areas_window();
+        let second = app.areas_window();
+
+        assert_eq!(first, second);
+        assert!(
+            first
+                .transient_for()
+                .is_some_and(|parent| parent.is::<Window>())
+        );
+    }
+
+    #[gtk::test]
+    fn areas_window_follows_the_recording() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let recording = Some((
+            RecordingState::Recording,
+            gst::ClockTime::ZERO,
+            CaptureWarnings::default(),
+        ));
+
+        // A recording that began before the window opened.
+        app.update_tray(recording);
+        let window = app.areas_window();
+        assert!(window.is_recording());
+
+        app.update_tray(None);
+        assert!(!window.is_recording());
+
+        app.update_tray(recording);
+        assert!(window.is_recording());
+        app.update_tray(None);
+    }
+
+    fn area() -> crate::areas::MarkedArea {
+        crate::areas::MarkedArea {
+            connector: "DP-3".into(),
+            x: 100,
+            y: 80,
+            width: 1280,
+            height: 720,
+            monitor_width: 1680,
+            monitor_height: 1050,
+            scale: 1.05,
+        }
+    }
+
+    /// Choosing an area from the tray also switches to Selection mode.
+    #[gtk::test]
+    fn tray_chooses_an_area_in_selection_mode() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let settings = app.settings();
+        settings.reset("capture-mode");
+        let store = app.area_store();
+        store.save_named("Demo", area(), false).unwrap();
+        store.save_named("Talk", area(), false).unwrap();
+
+        app.handle_tray_command(TrayRequest {
+            command: TrayCommand::SelectArea(Selected::Named("Demo".into())),
+            activation_token: None,
+        });
+
+        assert_eq!(store.selected(), Some(Selected::Named("Demo".into())));
+        assert_eq!(settings.capture_mode(), CaptureMode::Selection);
+        settings.reset("capture-mode");
+    }
+
+    #[gtk::test]
+    fn tray_toggles_the_area_border() {
+        let _lock = settings_lock();
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let app = Application::new();
+        let settings = app.settings();
+        settings.reset("show-area-border");
+        let before = settings.show_area_border();
+        let toggle = || {
+            app.handle_tray_command(TrayRequest {
+                command: TrayCommand::ToggleAreaBorder,
+                activation_token: None,
+            });
+        };
+
+        toggle();
+        assert_eq!(settings.show_area_border(), !before);
+        assert_eq!(tray_model(None, settings, None).show_area_border, !before);
+        toggle();
+        assert_eq!(settings.show_area_border(), before);
+        settings.reset("show-area-border");
+    }
+
+    #[test]
+    fn tray_model_without_overlays_has_no_areas() {
+        let _lock = settings_lock();
+        setup_schema();
+
+        let settings = Settings::default();
+        let model = tray_model(None, &settings, None);
+        assert!(!model.areas_available);
+        assert!(model.areas.is_empty());
+
+        let model = tray_model(None, &settings, Some(Vec::new()));
+        assert!(model.areas_available);
+    }
+
     #[test]
     fn apply_tray_command_syncs_window_action() {
         let _lock = settings_lock();
@@ -559,7 +805,7 @@ mod tests {
         let before = settings.record_microphone();
 
         assert!(apply_tray_command(
-            TrayCommand::ToggleMicrophone,
+            &TrayCommand::ToggleMicrophone,
             &settings,
             false
         ));
@@ -567,7 +813,7 @@ mod tests {
         assert_eq!(action.state(), Some((!before).to_variant()));
 
         assert!(!apply_tray_command(
-            TrayCommand::ToggleMicrophone,
+            &TrayCommand::ToggleMicrophone,
             &settings,
             true
         ));
@@ -594,6 +840,7 @@ mod tests {
                 CaptureWarnings::default(),
             )),
             &settings,
+            None,
         );
 
         assert_eq!(model.state, TrayRecordingState::Starting);
@@ -626,9 +873,9 @@ mod tests {
             activation_token: None,
         });
         assert!(settings.camera_enabled());
-        assert!(tray_model(None, settings).camera_enabled);
+        assert!(tray_model(None, settings, None).camera_enabled);
         assert_eq!(
-            tray_model(None, settings).camera_available,
+            tray_model(None, settings, None).camera_available,
             overlay::availability().is_ok()
         );
 
