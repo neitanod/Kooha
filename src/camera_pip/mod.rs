@@ -4,6 +4,7 @@
 pub mod caps;
 pub mod devices;
 pub mod geometry;
+pub mod v4l2;
 pub mod view;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
