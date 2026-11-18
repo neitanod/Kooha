@@ -77,6 +77,8 @@ máquina (GStreamer 1.28.2):
 `vah264lpenc` en esta máquina admite `cbr`, `vbr`, `cqp` y `qvbr`. Las dos cadenas codificaron 30
 cuadros de 1280×720 hasta el EOS con esos valores. Las mediciones de las tablas de arriba son
 anteriores a este cambio: corrieron con los valores por defecto de cada elemento.
+`tools/bench-capture.py` usa desde entonces los mismos valores, y la cola antes del codificador
+con el tope de 256 MiB del código, así que la medición con el portal mide las cadenas de Kooha.
 
 ## Portal de KDE
 
