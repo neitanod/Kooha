@@ -138,6 +138,12 @@
               </object>
             </child>
             <child>
+              <!-- Shown for the H.264 formats; the subtitle is set in code. -->
+              <object class="AdwComboRow" id="encoder_row">
+                <property name="title" translatable="yes">Encoder</property>
+              </object>
+            </child>
+            <child>
               <object class="AdwComboRow" id="framerate_row">
                 <property name="title" translatable="yes">Frame Rate</property>
               </object>

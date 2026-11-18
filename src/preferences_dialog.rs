@@ -13,12 +13,14 @@ use crate::{
         self,
         devices::{self, CameraSource},
     },
+    encoder::{self, H264Encoder},
     experimental::Feature,
     format,
+    i18n::gettext_f,
     item_row::ItemRow,
     overlay::{self, OverlayUnavailable},
     profile::Profile,
-    settings::{CameraShape, PauseFlashColor, Settings},
+    settings::{CameraShape, PauseFlashColor, Settings, VideoEncoder},
 };
 
 static BUILTIN_FRAMERATES: &[gst::Fraction] = &[
@@ -33,6 +35,18 @@ static BUILTIN_FRAMERATES: &[gst::Fraction] = &[
     gst::Fraction::new_raw(60_000, 1001), // 59.94
     gst::Fraction::from_integer(60),
 ];
+
+/// The items of the encoder row, in the order of the schema.
+const ENCODER_CHOICES: [VideoEncoder; 4] = [
+    VideoEncoder::Auto,
+    VideoEncoder::Intel,
+    VideoEncoder::Nvidia,
+    VideoEncoder::Cpu,
+];
+
+/// The size the encoder row probes Automatic with.
+#[cfg_attr(test, allow(dead_code))]
+const ENCODER_PROBE_SIZE: (i32, i32) = (1280, 720);
 
 const ROW_SELECTED_ITEM_NOTIFY_HANDLER_ID_KEY: &str = "kooha-row-selected-item-notify-handler-id";
 const SETTINGS_PROFILE_CHANGED_HANDLER_ID_KEY: &str = "kooha-settings-profile-changed-handler-id";
@@ -58,6 +72,8 @@ mod imp {
         pub(super) file_chooser_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub(super) profile_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(super) encoder_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(super) framerate_row: TemplateChild<adw::ComboRow>,
         #[template_child]
@@ -179,6 +195,7 @@ mod imp {
                 obj,
                 move |_| {
                     obj.update_profile_row_selected();
+                    obj.update_encoder_row_visible();
                 }
             ));
             settings.connect_framerate_changed(clone!(
@@ -194,6 +211,7 @@ mod imp {
             obj.update_framerate_row_selected();
 
             obj.setup_camera_rows();
+            obj.setup_encoder_row();
 
             // Load last active value first in `update_*_row` before connecting to
             // the signal to avoid unnecessary updates.
@@ -475,6 +493,92 @@ impl PreferencesDialog {
                 }
             }
         ));
+    }
+
+    /// The encoder row: its items, its link to the setting, its visibility
+    /// and the subtitle with what Automatic uses (ADR 0006).
+    fn setup_encoder_row(&self) {
+        let row = self.imp().encoder_row.get();
+        let settings = self.settings();
+
+        row.set_factory(Some(&row_factory(
+            &row,
+            "",
+            |list_item| {
+                let Some(choice) = ENCODER_CHOICES.get(list_item.position() as usize).copied()
+                else {
+                    return;
+                };
+                let missing = choice_encoder(choice).and_then(H264Encoder::missing_element);
+                let item_row = list_item.child().unwrap().downcast::<ItemRow>().unwrap();
+                item_row.set_title(encoder_item_label(choice, missing));
+                // A missing encoder can't be chosen, but a stored one is
+                // still shown with its reason.
+                list_item.set_selectable(missing.is_none());
+                list_item.set_activatable(missing.is_none());
+            },
+            |_| {},
+        )));
+        let labels = ENCODER_CHOICES.map(|choice| encoder_item_label(choice, None));
+        row.set_model(Some(&gtk::StringList::new(
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+        )));
+
+        let position = |encoder: VideoEncoder| {
+            ENCODER_CHOICES
+                .iter()
+                .position(|choice| *choice == encoder)
+                .map_or(0, |position| position as u32)
+        };
+        row.set_selected(position(settings.video_encoder()));
+        settings.connect_video_encoder_changed(clone!(
+            #[weak]
+            row,
+            move |settings| {
+                let selected = position(settings.video_encoder());
+                if row.selected() != selected {
+                    row.set_selected(selected);
+                }
+            }
+        ));
+        row.connect_selected_notify(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |row| {
+                let Some(choice) = ENCODER_CHOICES.get(row.selected() as usize).copied() else {
+                    return;
+                };
+                if choice != obj.settings().video_encoder() {
+                    obj.settings().set_video_encoder(choice);
+                }
+            }
+        ));
+
+        self.update_encoder_row_visible();
+
+        glib::spawn_future_local(clone!(
+            #[weak]
+            row,
+            async move {
+                let subtitle = match encoder::resolve(VideoEncoder::Auto, probe_encoder).await {
+                    Ok(encoder) => gettext_f(
+                        // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+                        "Automatic uses {encoder}",
+                        &[("encoder", encoder.name())],
+                    ),
+                    Err(_) => gettext("No encoder is working"),
+                };
+                row.set_subtitle(&subtitle);
+            }
+        ));
+    }
+
+    fn update_encoder_row_visible(&self) {
+        let uses_h264 = self
+            .settings()
+            .profile()
+            .is_some_and(Profile::uses_h264_encoder);
+        self.imp().encoder_row.set_visible(uses_h264);
     }
 
     pub fn profile_row_grab_focus(&self) -> bool {
@@ -803,6 +907,44 @@ fn keep_framerate_control(node: &Path) -> io::Result<i32> {
 #[cfg(test)]
 fn keep_framerate_control(node: &Path) -> io::Result<i32> {
     tests::fake_control(node)
+}
+
+/// The H.264 encoder of a choice, `None` for Automatic.
+fn choice_encoder(choice: VideoEncoder) -> Option<H264Encoder> {
+    match choice {
+        VideoEncoder::Auto => None,
+        VideoEncoder::Intel => Some(H264Encoder::Intel),
+        VideoEncoder::Nvidia => Some(H264Encoder::Nvidia),
+        VideoEncoder::Cpu => Some(H264Encoder::Cpu),
+    }
+}
+
+/// The label of an encoder item, with the element that is not installed.
+fn encoder_item_label(choice: VideoEncoder, missing_element: Option<&str>) -> String {
+    let name = choice_encoder(choice).map_or_else(|| gettext("Automatic"), |e| e.name().to_string());
+    match missing_element {
+        Some(element) => gettext_f(
+            // Translators: Do NOT translate the contents between '{' and '}', this is a variable name.
+            "{encoder} ({element} is not installed)",
+            &[("encoder", &name), ("element", element)],
+        ),
+        None => name,
+    }
+}
+
+#[cfg(not(test))]
+async fn probe_encoder(encoder: H264Encoder) -> Result<(), String> {
+    encoder.works(ENCODER_PROBE_SIZE).await
+}
+
+/// Stands for the probe in tests, which never start a hardware encoder:
+/// only the CPU works.
+#[cfg(test)]
+async fn probe_encoder(encoder: H264Encoder) -> Result<(), String> {
+    match encoder {
+        H264Encoder::Cpu => Ok(()),
+        H264Encoder::Intel | H264Encoder::Nvidia => Err(format!("{encoder:?} is fake")),
+    }
 }
 
 /// Why the camera and the area border are off, for the user.
@@ -1221,6 +1363,81 @@ mod tests {
         assert_eq!(activations.get(), 1);
 
         reset_camera_keys(&settings);
+    }
+
+    fn encoder_dialog() -> (Settings, PreferencesDialog) {
+        setup_schema();
+        init_resources();
+        gst::init().unwrap();
+
+        let settings = Settings::default();
+        settings.reset("profile-id");
+        settings.reset("video-encoder");
+        let dialog = PreferencesDialog::new(&settings);
+        (settings, dialog)
+    }
+
+    #[gtk::test]
+    fn encoder_row_is_visible_only_for_h264_profiles() {
+        let _lock = settings_lock();
+        let (settings, dialog) = encoder_dialog();
+        let row = dialog.imp().encoder_row.get();
+
+        for (id, visible) in [
+            ("mp4", true),
+            ("webm-vp8", false),
+            ("matroska-h264", true),
+            ("gif", false),
+        ] {
+            settings.set_profile(Some(Profile::from_id(id).unwrap()));
+            assert_eq!(row.is_visible(), visible, "{id}");
+        }
+
+        settings.reset("profile-id");
+    }
+
+    #[gtk::test]
+    fn encoder_row_follows_setting() {
+        let _lock = settings_lock();
+        let (settings, dialog) = encoder_dialog();
+        let row = dialog.imp().encoder_row.get();
+
+        assert_eq!(row.selected(), 0);
+        row.set_selected(3);
+        assert_eq!(settings.video_encoder(), VideoEncoder::Cpu);
+        settings.set_video_encoder(VideoEncoder::Nvidia);
+        assert_eq!(row.selected(), 2);
+
+        settings.reset("video-encoder");
+    }
+
+    #[gtk::test]
+    fn encoder_row_says_what_automatic_uses() {
+        let _lock = settings_lock();
+        let (settings, dialog) = encoder_dialog();
+        let row = dialog.imp().encoder_row.get();
+
+        // The fake probe only passes the CPU.
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while row.subtitle().is_none_or(|subtitle| subtitle.is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            context.iteration(false);
+        }
+        assert_eq!(row.subtitle().as_deref(), Some("Automatic uses CPU"));
+
+        settings.reset("video-encoder");
+    }
+
+    #[test]
+    fn encoder_items_name_the_missing_element() {
+        assert_eq!(encoder_item_label(VideoEncoder::Auto, None), "Automatic");
+        assert_eq!(encoder_item_label(VideoEncoder::Nvidia, None), "NVIDIA");
+        assert_eq!(
+            encoder_item_label(VideoEncoder::Intel, Some("vah264lpenc")),
+            "Intel (vah264lpenc is not installed)"
+        );
     }
 
     #[test]
