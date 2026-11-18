@@ -7,7 +7,7 @@ use std::{
     hash::Hash,
     panic::{self, AssertUnwindSafe},
     sync::{LazyLock, Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_channel::oneshot;
@@ -102,13 +102,13 @@ impl H264Encoder {
     }
 
     /// Runs `chain` on two test frames of `size`. Results are cached per
-    /// encoder and size, except a timeout, and a probe still running is
-    /// never launched twice.
+    /// encoder and size, except a timeout, and an encoder never runs two
+    /// probes at once.
     pub async fn works(self, size: (i32, i32)) -> Result<(), String> {
-        static CACHE: LazyLock<ProbeCache<(H264Encoder, (i32, i32))>> =
+        static CACHE: LazyLock<ProbeCache<H264Encoder, (i32, i32)>> =
             LazyLock::new(Mutex::default);
 
-        let result = cached(&CACHE, (self, size), PROBE_TIMEOUT, move || {
+        let result = cached(&CACHE, self, size, PROBE_TIMEOUT, move || {
             self.probe(size)
         })
         .await;
@@ -166,15 +166,39 @@ where
     Err(last_reason)
 }
 
-/// The probes, by encoder and size.
-type ProbeCache<K> = Mutex<HashMap<K, Entry>>;
+/// The probes of encoders `E` at sizes `S`.
+type ProbeCache<E, S> = Mutex<Probes<E, S>>;
 
 #[derive(Debug)]
-enum Entry {
-    /// The probe's thread still runs, and these requests wait for it.
-    InFlight(Vec<oneshot::Sender<Result<(), String>>>),
-    /// The result of a probe that did not time out.
-    Done(Result<(), String>),
+struct Probes<E, S> {
+    /// The results of the probes that did not time out, by encoder and size.
+    results: HashMap<(E, S), Result<(), String>>,
+    /// The probe whose thread still runs, at most one per encoder whatever
+    /// the size: a stuck driver must not take a thread per size (codex code
+    /// r2 #2).
+    in_flight: HashMap<E, InFlight<S>>,
+    next_id: u64,
+}
+
+impl<E, S> Default for Probes<E, S> {
+    fn default() -> Self {
+        Self {
+            results: HashMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InFlight<S> {
+    id: u64,
+    /// The requests waiting for it. Each gets the size probed with the
+    /// result, as one of another size probes its own after it.
+    waiting: Vec<oneshot::Sender<(S, Result<(), String>)>>,
+    /// A request timed out waiting for it: the thread may be stuck in the
+    /// driver, so the next requests time out at once (fable code r2 #5).
+    stuck: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,32 +219,63 @@ impl ProbeError {
     }
 }
 
-/// Returns the cached result for `key`, or waits at most `timeout` for
-/// `probe`, which runs in a thread of its own.
+/// Returns the cached result for `encoder` at `size`, or waits at most
+/// `timeout` for `probe`, which runs in a thread of its own.
 ///
 /// The thread outlives a timeout: an encoder can block in `set_state`. While
-/// it runs, `key` is in flight, and a new request waits for the same thread
-/// instead of launching another. When it ends, its result is cached, unless
-/// it timed out itself.
-async fn cached<K, F>(
-    cache: &'static ProbeCache<K>,
-    key: K,
+/// it runs, a new request for the same encoder launches no other thread: of
+/// the same size, it gets the result of the running one; of another size,
+/// it launches its own once the running one ends. After a request timed out
+/// waiting for it, the next ones time out at once. When it ends, its result
+/// is cached, unless it timed out itself.
+async fn cached<E, S, F>(
+    cache: &'static ProbeCache<E, S>,
+    encoder: E,
+    size: S,
     timeout: Duration,
     probe: F,
 ) -> Result<(), String>
 where
-    K: Eq + Hash + Clone + Send + 'static,
+    E: Eq + Hash + Clone + Send + 'static,
+    S: Eq + Hash + Clone + Send + 'static,
     F: FnOnce() -> Result<(), ProbeError> + Send + 'static,
 {
-    let (sender, receiver) = oneshot::channel();
-    {
-        let mut entries = lock(cache);
-        match entries.get_mut(&key) {
-            Some(Entry::Done(result)) => return result.clone(),
-            Some(Entry::InFlight(waiting)) => waiting.push(sender),
-            None => {
-                entries.insert(key.clone(), Entry::InFlight(vec![sender]));
-                let thread_key = key.clone();
+    let deadline = Instant::now() + timeout;
+    // The whole `timeout` the first time: the timer counts whole
+    // milliseconds, and what is left of it would end a bit early.
+    let mut left = timeout;
+    let mut probe = Some(probe);
+    loop {
+        let (sender, receiver) = oneshot::channel();
+        let id = {
+            let mut probes = lock(cache);
+            if let Some(result) = probes.results.get(&(encoder.clone(), size.clone())) {
+                return result.clone();
+            }
+            let next_id = probes.next_id;
+            if let Some(in_flight) = probes.in_flight.get_mut(&encoder) {
+                if in_flight.stuck {
+                    return Err(ProbeError::TimedOut.reason());
+                }
+                in_flight.waiting.push(sender);
+                in_flight.id
+            } else {
+                // Only a probe of another size ended before this one: this
+                // request has not launched its own yet.
+                let Some(probe) = probe.take() else {
+                    return Err("The probe ended with no result".to_string());
+                };
+                probes.next_id += 1;
+                probes.in_flight.insert(
+                    encoder.clone(),
+                    InFlight {
+                        id: next_id,
+                        waiting: vec![sender],
+                        stuck: false,
+                    },
+                );
+                let thread_encoder = encoder.clone();
+                let thread_size = size.clone();
                 let spawned = std::thread::Builder::new()
                     .name("kooha-encoder-probe".to_string())
                     .spawn(move || {
@@ -228,46 +283,69 @@ where
                             panic::catch_unwind(AssertUnwindSafe(probe)).unwrap_or_else(|_| {
                                 Err(ProbeError::Failed("The probe panicked".to_string()))
                             });
-                        finish(cache, thread_key, result);
+                        finish(cache, thread_encoder, next_id, thread_size, result);
                     });
                 if let Err(err) = spawned {
                     // No thread finishes this entry.
-                    entries.remove(&key);
+                    probes.in_flight.remove(&encoder);
                     return Err(format!("Failed to start the encoder probe: {err}"));
                 }
+                next_id
+            }
+        };
+
+        match glib::future_with_timeout(left, receiver).await {
+            Ok(Ok((probed, result))) if probed == size => return result,
+            // The probe of another size ended: now this one's, in what is
+            // left of `timeout`.
+            Ok(Ok(_)) => left = deadline.saturating_duration_since(Instant::now()),
+            Ok(Err(oneshot::Canceled)) => return Err("The probe ended with no result".to_string()),
+            Err(_) => {
+                let mut probes = lock(cache);
+                if let Some(in_flight) = probes.in_flight.get_mut(&encoder)
+                    && in_flight.id == id
+                {
+                    in_flight.stuck = true;
+                    // Those that gave up, this one among them.
+                    in_flight.waiting.retain(|sender| !sender.is_canceled());
+                }
+                return Err(ProbeError::TimedOut.reason());
             }
         }
     }
-
-    match glib::future_with_timeout(timeout, receiver).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(oneshot::Canceled)) => Err("The probe ended with no result".to_string()),
-        Err(_) => Err(ProbeError::TimedOut.reason()),
-    }
 }
 
-/// Caches the result of the probe of `key`, whose thread ends, and hands it
-/// to the requests still waiting.
-fn finish<K: Eq + Hash>(cache: &ProbeCache<K>, key: K, result: Result<(), ProbeError>) {
+/// Caches the result of the probe `id` of `encoder` at `size`, whose thread
+/// ends, and hands it to the requests still waiting.
+fn finish<E: Eq + Hash, S: Eq + Hash + Clone>(
+    cache: &ProbeCache<E, S>,
+    encoder: E,
+    id: u64,
+    size: S,
+    result: Result<(), ProbeError>,
+) {
     let timed_out = result == Err(ProbeError::TimedOut);
     let result = result.map_err(ProbeError::reason);
 
-    let mut entries = lock(cache);
-    let waiting = match entries.remove(&key) {
-        Some(Entry::InFlight(waiting)) => waiting,
-        other => {
-            debug_assert!(other.is_none(), "{other:?}");
+    let mut probes = lock(cache);
+    let waiting = match probes.in_flight.remove(&encoder) {
+        Some(in_flight) => {
+            debug_assert_eq!(in_flight.id, id);
+            in_flight.waiting
+        }
+        None => {
+            debug_assert!(false, "the probe {id} was not in flight");
             Vec::new()
         }
     };
     if !timed_out {
-        entries.insert(key, Entry::Done(result.clone()));
+        probes.results.insert((encoder, size.clone()), result.clone());
     }
-    drop(entries);
+    drop(probes);
 
     for sender in waiting {
         // The request may have timed out already.
-        let _ = sender.send(result.clone());
+        let _ = sender.send((size.clone(), result.clone()));
     }
 }
 
@@ -398,7 +476,7 @@ mod tests {
     }
 
     /// A cache that lives as long as the probe threads that write to it.
-    fn new_cache() -> &'static ProbeCache<&'static str> {
+    fn new_cache() -> &'static ProbeCache<&'static str, u32> {
         Box::leak(Box::default())
     }
 
@@ -411,7 +489,7 @@ mod tests {
         for _ in 0..2 {
             let runs = Arc::clone(&runs);
             let result = result.clone();
-            last = block_on(cached(cache, "key", PROBE_TIMEOUT, move || {
+            last = block_on(cached(cache, "key", 0, PROBE_TIMEOUT, move || {
                 runs.fetch_add(1, Ordering::SeqCst);
                 result
             }));
@@ -451,7 +529,7 @@ mod tests {
         let mut last = Ok(());
         for _ in 0..2 {
             let runs = Arc::clone(&runs);
-            last = block_on(cached(cache, "key", PROBE_TIMEOUT, move || {
+            last = block_on(cached(cache, "key", 0, PROBE_TIMEOUT, move || {
                 runs.fetch_add(1, Ordering::SeqCst);
                 panic!("the driver crashed");
             }));
@@ -481,45 +559,72 @@ mod tests {
     }
 
     #[test]
-    fn a_stuck_probe_is_not_launched_again_while_it_runs() {
+    fn a_stuck_probe_answers_the_next_requests_at_once() {
         const TIMEOUT: Duration = Duration::from_millis(300);
         let cache = new_cache();
         let runs = Arc::new(AtomicUsize::new(0));
         let (release, released) = mpsc::channel();
         let released = Arc::new(Mutex::new(released));
 
-        for _ in 0..2 {
+        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
+        assert!(result.unwrap_err().contains("did not answer"));
+        assert!(elapsed >= TIMEOUT, "{elapsed:?}");
+        assert!(elapsed < TIMEOUT * 5, "{elapsed:?}");
+
+        // Once a request timed out, the next ones, of any size, don't wait
+        // for the stuck thread nor launch another (fable code r2 #5, codex
+        // code r2 #2).
+        for size in [0, 1, 0] {
             let (result, elapsed) =
-                timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
+                timed(cached(cache, "key", size, TIMEOUT, stuck_probe(&runs, &released)));
             assert!(result.unwrap_err().contains("did not answer"));
-            assert!(elapsed >= TIMEOUT, "{elapsed:?}");
-            assert!(elapsed < TIMEOUT * 5, "{elapsed:?}");
+            assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
         }
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+        // The requests that gave up wait no more.
+        assert!(lock(cache).in_flight["key"].waiting.is_empty());
 
         // Once the thread ends, its result is the cached one.
         release.send(Ok(())).unwrap();
         let start = Instant::now();
-        while !matches!(lock(cache).get("key"), Some(Entry::Done(_))) {
+        while !lock(cache).results.contains_key(&("key", 0)) {
             assert!(start.elapsed() < Duration::from_secs(2));
             std::thread::sleep(Duration::from_millis(10));
         }
-        let (result, elapsed) = timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
         assert_eq!(result, Ok(()));
         assert!(elapsed < TIMEOUT, "{elapsed:?}");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // And another size is probed again.
+        release.send(Ok(())).unwrap();
+        let (result, _) = timed(cached(cache, "key", 1, TIMEOUT, stuck_probe(&runs, &released)));
+        assert_eq!(result, Ok(()));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    /// Waits until `runs` is `n`.
+    fn wait_for_runs(runs: &AtomicUsize, n: usize) {
+        let start = Instant::now();
+        while runs.load(Ordering::SeqCst) < n {
+            assert!(start.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
     fn a_second_request_gets_the_result_of_the_probe_in_flight() {
-        const TIMEOUT: Duration = Duration::from_millis(500);
+        const TIMEOUT: Duration = Duration::from_millis(1000);
         let cache = new_cache();
         let runs = Arc::new(AtomicUsize::new(0));
         let (release, released) = mpsc::channel();
         let released = Arc::new(Mutex::new(released));
 
-        let (result, _) = timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
-        assert!(result.unwrap_err().contains("did not answer"));
+        let first = std::thread::spawn({
+            let probe = stuck_probe(&runs, &released);
+            move || timed(cached(cache, "key", 0, TIMEOUT, probe)).0
+        });
+        wait_for_runs(&runs, 1);
 
         // The probe ends 100 ms into the second request.
         let sender = std::thread::spawn(move || {
@@ -528,13 +633,54 @@ mod tests {
                 .send(Err(ProbeError::Failed("no device".to_string())))
                 .unwrap();
         });
-        let (result, elapsed) = timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, elapsed) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
         sender.join().unwrap();
 
         assert_eq!(result, Err("no device".to_string()));
+        assert_eq!(first.join().unwrap(), Err("no device".to_string()));
         assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
         assert!(elapsed < TIMEOUT, "{elapsed:?}");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn another_size_waits_for_the_probe_in_flight_before_its_own() {
+        const TIMEOUT: Duration = Duration::from_millis(1000);
+        let cache = new_cache();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (release, released) = mpsc::channel();
+        let released = Arc::new(Mutex::new(released));
+
+        let first = std::thread::spawn({
+            let probe = stuck_probe(&runs, &released);
+            move || timed(cached(cache, "key", 0, TIMEOUT, probe)).0
+        });
+        wait_for_runs(&runs, 1);
+        let second = std::thread::spawn({
+            let probe = stuck_probe(&runs, &released);
+            move || timed(cached(cache, "key", 1, TIMEOUT, probe))
+        });
+
+        // No second thread of the same encoder while the first one runs
+        // (codex code r2 #2).
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        release.send(Ok(())).unwrap();
+        wait_for_runs(&runs, 2);
+        release
+            .send(Err(ProbeError::Failed("too big".to_string())))
+            .unwrap();
+
+        assert_eq!(first.join().unwrap(), Ok(()));
+        let (result, elapsed) = second.join().unwrap();
+        assert_eq!(result, Err("too big".to_string()));
+        assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
+        assert!(elapsed < TIMEOUT, "{elapsed:?}");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        let probes = lock(cache);
+        assert_eq!(probes.results[&("key", 0)], Ok(()));
+        assert_eq!(probes.results[&("key", 1)], Err("too big".to_string()));
     }
 
     #[test]
@@ -545,17 +691,17 @@ mod tests {
         let (release, released) = mpsc::channel();
         let released = Arc::new(Mutex::new(released));
 
-        let (result, _) = timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, _) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
         assert!(result.unwrap_err().contains("did not answer"));
         release.send(Err(ProbeError::TimedOut)).unwrap();
         let start = Instant::now();
-        while lock(cache).contains_key("key") {
+        while lock(cache).in_flight.contains_key("key") {
             assert!(start.elapsed() < Duration::from_secs(2));
             std::thread::sleep(Duration::from_millis(10));
         }
 
         release.send(Ok(())).unwrap();
-        let (result, _) = timed(cached(cache, "key", TIMEOUT, stuck_probe(&runs, &released)));
+        let (result, _) = timed(cached(cache, "key", 0, TIMEOUT, stuck_probe(&runs, &released)));
         assert_eq!(result, Ok(()));
         assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
@@ -566,7 +712,7 @@ mod tests {
         gst::init().unwrap();
 
         let description = "videotestsrc is-live=true ! fakesink";
-        let (result, elapsed) = timed(cached(new_cache(), "key", TIMEOUT, move || {
+        let (result, elapsed) = timed(cached(new_cache(), "key", 0, TIMEOUT, move || {
             play_until_end(description, TIMEOUT)
         }));
 
