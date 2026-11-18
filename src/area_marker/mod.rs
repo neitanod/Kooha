@@ -50,12 +50,27 @@ impl fmt::Display for AlreadyMarking {
 
 impl error::Error for AlreadyMarking {}
 
+/// There is no monitor to mark an area on.
+#[cfg_attr(not(feature = "layer-shell"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoMonitors;
+
+impl fmt::Display for NoMonitors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "There is no monitor to mark an area on")
+    }
+}
+
+impl error::Error for NoMonitors {}
+
 /// Shows a marking layer on every monitor and waits for the area: Enter
 /// returns it, Escape or the secondary button fail with `Cancelled`. The
 /// layers are destroyed before it returns.
 ///
 /// `initial` is preloaded if its monitor is connected and the rectangle fits
-/// on it.
+/// on it. Without monitors it fails with `NoMonitors` at once. A monitor
+/// connected while marking gets no layer: the area goes on one of the
+/// others.
 // The window and the recording call it (chunk 5).
 #[allow(dead_code)]
 #[cfg_attr(not(feature = "layer-shell"), allow(clippy::unused_async))]
@@ -228,7 +243,7 @@ mod layers {
     use gtk::{gdk, glib, prelude::*};
 
     use super::{
-        KeyAction, LayerFocus, active_layer, finish, key_action, preload,
+        KeyAction, LayerFocus, NoMonitors, active_layer, finish, key_action, preload,
         view::{Events, LayerEvent, MarkerLayer},
     };
     use crate::{
@@ -257,7 +272,8 @@ mod layers {
 
     impl AreaMarker {
         /// Builds a layer per monitor, without showing them. The receiver
-        /// gets the area or the error once.
+        /// gets the area or the error once; `NoMonitors` right away if
+        /// there is none.
         pub fn new(
             monitors: Vec<(gdk::Monitor, MonitorInfo)>,
             initial: Option<&MarkedArea>,
@@ -306,6 +322,11 @@ mod layers {
                 })
                 .collect();
             inner.layers.replace(entries);
+
+            // No layer would ever answer (fable code r1 #13).
+            if inner.layers.borrow().is_empty() {
+                inner.answer(Err(NoMonitors.into()));
+            }
 
             // One layer at a time holds the keyboard: the protocol has no
             // way to ask for the focus.
@@ -664,6 +685,15 @@ mod layers {
             assert!(marker.handle(0, LayerEvent::Cancel));
             let err = glib::MainContext::default().block_on(result).unwrap_err();
             assert!(err.is::<Cancelled>());
+        }
+
+        #[gtk::test]
+        fn without_monitors_the_marking_fails_at_once() {
+            let (marker, result) = AreaMarker::new(Vec::new(), None);
+
+            let err = glib::MainContext::default().block_on(result).unwrap_err();
+            assert!(err.is::<NoMonitors>(), "{err:?}");
+            drop(marker);
         }
 
         #[gtk::test]
